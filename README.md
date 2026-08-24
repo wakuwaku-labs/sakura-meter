@@ -3,6 +3,8 @@
 Googleマップの公開情報から、飲食店のクチコミが「サクラ(やらせクチコミ)的なパターン」と
 どれだけ一致するかを**参考値**として表示する、個人開発の無料Webアプリです。
 
+**公開URL**: <https://wakuwaku-labs.github.io/sakura-meter/>(GitHub Pages・無料ホスティング)
+
 > **大切な前提**: 本アプリの表示は統計的な推定による参考値であり、
 > 特定店舗によるサクラ利用の事実を断定・証明するものではありません。
 > 詳しくはアプリ内の「免責・法的配慮」をご覧ください。
@@ -23,20 +25,27 @@ cd "/Users/katagirijakutou/飲食店　サクラチェッカー" && python3 -m h
 ## 2. 実際の店舗を検索する(Googleマップ連携)
 
 Google Maps Platform のAPIキーを設定すると、全国の実在の飲食店を検索して分析できます。
+**この手順は、Googleアカウントへのログインと請求先アカウント(支払い方法)の登録を伴うため、
+ご自身で行っていただく必要があります**(セキュリティ上、第三者が代行できない操作です)。
 
 ### APIキーの取得手順
 
 1. [Google Cloud Console](https://console.cloud.google.com/) で Google アカウントにログインし、新しいプロジェクトを作成
-2. 「APIとサービス → ライブラリ」から次の2つを**有効化**
+2. 「お支払い」で請求先アカウント(支払い方法)を登録(無料枠の範囲内でもこの設定は必須です)
+3. 「APIとサービス → ライブラリ」から次の2つを**有効化**
    - **Maps JavaScript API**
    - **Places API (New)**
-3. 「APIとサービス → 認証情報」で **APIキー** を作成
-4. キーに制限をかける(推奨)
-   - アプリケーションの制限: 「ウェブサイト」→ `http://localhost:8000/*` など実際に使うURL
+4. 「APIとサービス → 認証情報」で **APIキー** を作成
+5. キーに制限をかける(推奨)
+   - アプリケーションの制限: 「ウェブサイト」→ 実際に使うURLを登録
+     - 公開版を使う場合: `https://wakuwaku-labs.github.io/sakura-meter/*`
+     - ローカルで試す場合: `http://localhost:8000/*`
    - APIの制限: 上記2つのAPIのみ許可
-5. アプリ右上の「設定」からAPIキーを貼り付けて保存
+6. 公開版(<https://wakuwaku-labs.github.io/sakura-meter/>)を開き、右上の「設定」からAPIキーを貼り付けて保存
 
 APIキーはお使いのブラウザ(localStorage)にのみ保存され、Google以外の外部には送信されません。
+他の人がこの公開版を訪れても、それぞれ自分のAPIキーを設定しない限り実店舗検索はできず
+(自動的にデモモードになります)、あなたのAPI利用枠が他の訪問者に消費されることはありません。
 
 ### 無料で運用するために(重要)
 
@@ -76,11 +85,18 @@ APIキーはお使いのブラウザ(localStorage)にのみ保存され、Google
 | 店舗を選択して分析 | Places API Place Details(クチコミ取得)× 1 |
 | 地図表示 | Maps JavaScript API のマップロード |
 
-## 3. 無料で公開したい場合
+## 3. 公開について
 
-静的ファイルのみで動くため、**GitHub Pages / Cloudflare Pages / Netlify** などの
-無料ホスティングにフォルダごとアップロードするだけで公開できます。
-公開する場合は、APIキーのリファラー制限を公開URLに合わせて更新してください。
+GitHub Pages(無料)に公開済みです: <https://wakuwaku-labs.github.io/sakura-meter/>
+(リポジトリ: <https://github.com/wakuwaku-labs/sakura-meter>)
+
+更新を反映するには、このディレクトリで変更をコミットして `main` ブランチにプッシュしてください。
+
+```bash
+git add -A && git commit -m "更新内容" && git push
+```
+
+数十秒〜1分ほどでGitHub Pagesに反映されます。
 
 ## 4. ファイル構成
 
