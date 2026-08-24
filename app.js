@@ -1,0 +1,584 @@
+/* =========================================================================
+ * サクラメーター app.js
+ * UI描画 / デモモード / Google Maps Platform 連携
+ * ========================================================================= */
+
+(() => {
+  "use strict";
+
+  const KEY_STORAGE = "sakura_meter_api_key";
+  const DEMO_ONLY = typeof window !== "undefined" && window.SAKURA_DEMO_ONLY === true;
+
+  const state = {
+    mode: "demo",          // "demo" | "live"
+    apiKey: null,
+    places: [],            // 正規化済み: {id,name,genre,area,address,rating,userRatingCount,priceLevel,reviews?,gmapsUri?,location?,_live?}
+    selectedId: null,
+    map: null,
+    markers: [],
+    mapsReady: false,
+  };
+
+  const $ = (sel) => document.querySelector(sel);
+  const esc = (s) =>
+    String(s ?? "").replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+    );
+
+  /* ---------------- 初期化 ---------------- */
+  document.addEventListener("DOMContentLoaded", async () => {
+    setupModals();
+    if (DEMO_ONLY) {
+      /* 共有用デモ版: APIキー設定UIを取り除く */
+      document.querySelectorAll('[data-modal="settings"]').forEach((el) => el.remove());
+      const settingsModal = document.getElementById("modal-settings");
+      if (settingsModal) settingsModal.remove();
+    } else {
+      setupSettings();
+    }
+    setupSearch();
+
+    state.apiKey = DEMO_ONLY ? null : localStorage.getItem(KEY_STORAGE);
+    let keyError = null;
+    if (state.apiKey) {
+      renderModeBanner("loading");
+      const ok = await loadGoogleMaps(state.apiKey);
+      state.mode = ok ? "live" : "demo";
+      if (!ok) keyError = "Google マップの読み込みに失敗しました。APIキーと有効化済みAPIをご確認ください。デモモードで動作します。";
+    }
+    renderModeBanner(null, keyError);
+
+    if (state.mode === "demo") {
+      state.places = DEMO_PLACES.map(normalizeDemoPlace);
+      renderResults("デモ店舗一覧(架空データ)");
+    }
+  });
+
+  function normalizeDemoPlace(p) {
+    return { ...p, _live: false };
+  }
+
+  /* ---------------- モードバナー ---------------- */
+  function renderModeBanner(override, errorMsg) {
+    const el = $("#mode-banner");
+    if (override === "loading") {
+      el.innerHTML = `<span class="mode-chip live">Google連携</span><span>Googleマップを読み込んでいます…</span>`;
+      return;
+    }
+    if (state.mode === "live") {
+      el.innerHTML = `
+        <span class="mode-chip live">Google連携中</span>
+        <span>Googleマップの実データを検索・分析します。</span>
+        ${DEMO_ONLY ? "" : `<button class="linklike" type="button" data-modal="settings">設定</button>`}`;
+    } else {
+      el.innerHTML = `
+        <span class="mode-chip demo">デモモード</span>
+        <span>架空の店舗データで動作中です(実在の店舗ではありません)。</span>
+        ${DEMO_ONLY
+          ? `<span>実在の店舗を検索できる版は、配布ファイル(README.md)の手順でご利用いただけます。</span>`
+          : `<button class="linklike" type="button" data-modal="settings">APIキーを設定して実際の店舗を検索する</button>`}`;
+    }
+    if (errorMsg) {
+      const div = document.createElement("div");
+      div.className = "status-line error";
+      div.textContent = errorMsg;
+      el.appendChild(div);
+    }
+    bindModalButtons(el);
+  }
+
+  /* ---------------- 検索 ---------------- */
+  function setupSearch() {
+    $("#search-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const q = $("#search-input").value.trim();
+      if (state.mode === "live") {
+        await liveSearch(q);
+      } else {
+        demoSearch(q);
+      }
+    });
+  }
+
+  function demoSearch(q) {
+    const all = DEMO_PLACES.map(normalizeDemoPlace);
+    if (!q) {
+      state.places = all;
+    } else {
+      const tokens = q.split(/[\s　]+/).filter(Boolean);
+      state.places = all.filter((p) => {
+        const hay = `${p.name} ${p.genre} ${p.area} ${p.address}`;
+        return tokens.every((t) => hay.includes(t));
+      });
+    }
+    state.selectedId = null;
+    renderResults(q ? `「${q}」のデモ検索結果` : "デモ店舗一覧(架空データ)");
+    renderPlaceholder();
+  }
+
+  async function liveSearch(q) {
+    if (!q) {
+      renderResultsMessage("検索キーワードを入力してください(例: 渋谷 焼肉)。");
+      return;
+    }
+    renderResultsMessage("Googleマップを検索しています…", true);
+    try {
+      const { Place } = await google.maps.importLibrary("places");
+      const { places } = await Place.searchByText({
+        textQuery: q,
+        includedType: "restaurant",
+        language: "ja",
+        region: "jp",
+        maxResultCount: 20,
+        fields: [
+          "displayName", "formattedAddress", "location",
+          "rating", "userRatingCount", "priceLevel", "id",
+        ],
+      });
+      state.places = (places || []).map((pl) => ({
+        id: pl.id,
+        name: pl.displayName || "(名称不明)",
+        genre: "",
+        area: "",
+        address: pl.formattedAddress || "",
+        rating: pl.rating ?? null,
+        userRatingCount: pl.userRatingCount ?? 0,
+        priceLevel: normalizePriceLevel(pl.priceLevel),
+        location: pl.location || null,
+        _placeObj: pl,
+        _live: true,
+      }));
+      state.selectedId = null;
+      renderResults(`「${q}」の検索結果`);
+      renderPlaceholder();
+      renderMap();
+    } catch (err) {
+      console.error(err);
+      renderResultsMessage("検索に失敗しました。APIキーの権限(Places API (New) の有効化)や利用上限をご確認ください。");
+    }
+  }
+
+  function normalizePriceLevel(v) {
+    if (v == null) return null;
+    if (typeof v === "number") return v;
+    const map = { FREE: 0, INEXPENSIVE: 1, MODERATE: 2, EXPENSIVE: 3, VERY_EXPENSIVE: 4 };
+    const key = String(v).replace("PRICE_LEVEL_", "");
+    return map[key] ?? null;
+  }
+
+  /* ---------------- 結果リスト ---------------- */
+  function renderResultsMessage(msg, loading) {
+    $("#result-list").innerHTML = `<li class="empty-note${loading ? " loading" : ""}">${esc(msg)}</li>`;
+  }
+
+  function renderResults(title) {
+    $("#results-title").textContent = title || "検索結果";
+    $("#results-attribution").textContent =
+      state.mode === "live" ? "検索結果: Google マップ提供" : "架空のサンプルデータ";
+
+    const list = $("#result-list");
+    if (state.places.length === 0) {
+      renderResultsMessage("該当する店舗が見つかりませんでした。キーワードを変えてお試しください。");
+      return;
+    }
+    list.innerHTML = state.places
+      .map((p) => {
+        const stars = p.rating != null ? starString(p.rating) : "";
+        const price = p.priceLevel ? "・" + "¥".repeat(p.priceLevel) : "";
+        return `
+        <li>
+          <button class="result-card${p.id === state.selectedId ? " selected" : ""}" data-id="${esc(p.id)}" type="button">
+            <p class="result-name">${esc(p.name)}</p>
+            <div class="result-meta">
+              ${p.rating != null ? `<span class="stars" aria-hidden="true">${stars}</span><span>${p.rating.toFixed(1)}</span>` : "<span>評価なし</span>"}
+              <span class="result-count">(${p.userRatingCount ?? 0}件)</span>
+              ${p.genre ? `<span>${esc(p.genre)}</span>` : ""}${price ? `<span>${price.slice(1)}</span>` : ""}
+            </div>
+            <div class="result-meta">${esc(p.address)}</div>
+          </button>
+        </li>`;
+      })
+      .join("");
+
+    list.querySelectorAll(".result-card").forEach((btn) => {
+      btn.addEventListener("click", () => selectPlace(btn.dataset.id));
+    });
+  }
+
+  function starString(rating) {
+    const full = Math.round(rating);
+    return "★".repeat(full) + "☆".repeat(5 - full);
+  }
+
+  /* ---------------- 店舗選択 → 分析 ---------------- */
+  async function selectPlace(id) {
+    const place = state.places.find((p) => p.id === id);
+    if (!place) return;
+    state.selectedId = id;
+    renderResults($("#results-title").textContent);
+
+    if (place._live && !place.reviews && !place._fetchingReviews) {
+      place._fetchingReviews = true;
+      $("#analysis-panel").innerHTML = `<div class="loading">クチコミを取得して分析しています…</div>`;
+      try {
+        await place._placeObj.fetchFields({ fields: ["reviews", "googleMapsURI"] });
+        place.gmapsUri = place._placeObj.googleMapsURI || null;
+        place.reviews = (place._placeObj.reviews || []).map(normalizeLiveReview);
+      } catch (err) {
+        console.error(err);
+        place.reviews = [];
+        place.reviewFetchError = true;
+      } finally {
+        place._fetchingReviews = false;
+      }
+    }
+
+    /* 選択後の非同期取得中に他の店舗が選ばれていたら、古い応答は描画しない */
+    if (state.selectedId !== id) return;
+
+    try {
+      const peers = state.places.filter((p) => p.id !== id);
+      const result = Analyzer.analyze(place, peers);
+      renderAnalysis(place, result);
+    } catch (err) {
+      console.error(err);
+      $("#analysis-panel").innerHTML = `<div class="panel-placeholder">分析中にエラーが発生しました。お手数ですが、もう一度店舗を選び直してください。</div>`;
+      return;
+    }
+    if (window.matchMedia("(max-width: 900px)").matches) {
+      $("#analysis-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
+
+  function normalizeLiveReview(r) {
+    let text = r.text;
+    if (text && typeof text === "object") text = text.text ?? "";
+    let publishTime = r.publishTime;
+    if (publishTime instanceof Date) publishTime = publishTime.toISOString();
+    return {
+      rating: r.rating ?? null,
+      text: text || "",
+      publishTime: publishTime || null,
+      author: (r.authorAttribution && r.authorAttribution.displayName) || "Googleユーザー",
+      relative: r.relativePublishTimeDescription || "",
+    };
+  }
+
+  /* ---------------- 分析パネル描画 ---------------- */
+  const BAND_CHIP_CLASS = {
+    low: "band-low-chip",
+    mild: "band-mild-chip",
+    caution: "band-caution-chip",
+    strong: "band-strong-chip",
+  };
+  const BAND_COLOR_VAR = {
+    low: "var(--band-low)",
+    mild: "var(--band-mild)",
+    caution: "var(--band-caution)",
+    strong: "var(--band-strong)",
+  };
+
+  function renderAnalysis(place, result) {
+    const panel = $("#analysis-panel");
+    const r = result;
+
+    const headerHtml = `
+      <header class="place-header">
+        <h2>${esc(place.name)}</h2>
+        <div class="place-sub">
+          ${place.rating != null ? `<span><span class="stars" aria-hidden="true">${starString(place.rating)}</span> ${place.rating.toFixed(1)}(${place.userRatingCount}件)</span>` : ""}
+          ${place.genre ? `<span>${esc(place.genre)}</span>` : ""}
+          <span>${esc(place.address)}</span>
+          ${place.gmapsUri ? `<a href="${esc(place.gmapsUri)}" target="_blank" rel="noopener">Googleマップで見る</a>` : ""}
+        </div>
+        ${place._live ? "" : `<span class="demo-flag">デモデータ — 実在の店舗ではありません</span>`}
+      </header>`;
+
+    if (!r.analyzable) {
+      panel.innerHTML = `
+        ${headerHtml}
+        <div class="panel-placeholder">
+          この店舗は分析に必要なデータ(評価・クチコミ)が不足しているため、スコアを算出できません。<br>
+          クチコミが増えてから改めてお試しください。
+        </div>
+        ${disclaimerHtml()}`;
+      return;
+    }
+
+    const circumference = 2 * Math.PI * 80;
+    const dash = (r.score / 100) * circumference;
+    const bandColor = BAND_COLOR_VAR[r.band.key];
+
+    const gaugeHtml = `
+      <div class="score-area">
+        <div class="gauge-wrap" role="img" aria-label="サクラ的パターン一致度 ${r.score}%(${r.band.label})">
+          <svg viewBox="0 0 190 190">
+            <circle class="gauge-track" cx="95" cy="95" r="80" fill="none" stroke-width="14"></circle>
+            <circle class="gauge-value" cx="95" cy="95" r="80" fill="none" stroke-width="14"
+              stroke="${bandColor}" stroke-linecap="round"
+              stroke-dasharray="${circumference.toFixed(1)}"
+              stroke-dashoffset="${circumference.toFixed(1)}"></circle>
+          </svg>
+          <div class="gauge-center">
+            <span class="gauge-number" style="color:${bandColor}">${r.score}<small>%</small></span>
+            <span class="gauge-caption">参考値</span>
+          </div>
+        </div>
+        <div class="score-side">
+          <p class="score-title">サクラ的パターン一致度(参考値)</p>
+          <span class="band-chip ${BAND_CHIP_CLASS[r.band.key]}">${r.band.label}</span>
+          <p class="band-summary">${esc(r.band.summary)}</p>
+          <div class="confidence-row">
+            <span>信頼度:</span>
+            <span class="conf-chip ${r.confidence.level}">${r.confidence.label}</span>
+            <span>${esc(r.confidence.reasons.join(" / "))}</span>
+          </div>
+          <button class="method-link" type="button" data-modal="method">この数値の算出方法を見る</button>
+          ${r.relief ? `<p class="relief-note">${esc(r.relief.note)}</p>` : ""}
+        </div>
+      </div>`;
+
+    const signalsHtml = `
+      <section class="signals-section">
+        <h3>シグナル内訳 <span class="section-note">クリックで根拠と代替説明を表示</span></h3>
+        <div class="signal-list">
+          ${r.signals.map(signalItemHtml).join("")}
+        </div>
+      </section>`;
+
+    const reviews = place.reviews || [];
+    const reviewsHtml = `
+      <section class="reviews-section">
+        <h3>分析対象のクチコミ
+          <span class="section-note">${place._live
+            ? `Google マップより(公式APIが返す関連度順・最大5件)`
+            : `架空のサンプルクチコミ(${reviews.length}件)`}</span>
+        </h3>
+        ${place.reviewFetchError ? `<p class="status-line error">クチコミの取得に失敗しました。</p>` : ""}
+        <div class="review-list">
+          ${reviews.length === 0 ? `<p class="empty-note">表示できるクチコミがありません。</p>` : reviews.map(reviewItemHtml).join("")}
+        </div>
+      </section>`;
+
+    panel.innerHTML = headerHtml + gaugeHtml + signalsHtml + reviewsHtml + disclaimerHtml();
+    bindModalButtons(panel);
+
+    /* ゲージのアニメーション(reduced-motion環境ではCSS側で無効化) */
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const c = panel.querySelector(".gauge-value");
+        if (c) c.style.strokeDashoffset = (circumference - dash).toFixed(1);
+      });
+    });
+  }
+
+  function signalItemHtml(s) {
+    if (!s.included) {
+      const baseWeightPct = Math.round(s.weight * 100);
+      return `
+      <details class="signal-item">
+        <summary class="signal-summary">
+          <span class="signal-name">${esc(s.label)}<span class="signal-weight">本来の重み${baseWeightPct}%(今回は対象外)</span></span>
+          <span class="signal-bar-track"><span class="signal-bar-fill" style="width:0%"></span></span>
+          <span class="signal-score na">対象外</span>
+        </summary>
+        <div class="signal-body">
+          <p><span class="tag">このシグナルが見るもの</span>${esc(s.description)}</p>
+          <p><span class="tag">対象外の理由</span>${esc(s.evidence)}</p>
+        </div>
+      </details>`;
+    }
+    /* 表示する重みは、除外シグナル分を再配分した後の「実際にスコアへ
+     * 効いた割合」(effectiveWeight)。静的な既定重みではない。 */
+    const weightPct = Math.round(s.effectiveWeight * 100);
+    return `
+    <details class="signal-item">
+      <summary class="signal-summary">
+        <span class="signal-name">${esc(s.label)}<span class="signal-weight">今回の寄与度${weightPct}%</span></span>
+        <span class="signal-bar-track"><span class="signal-bar-fill" style="width:${s.score}%"></span></span>
+        <span class="signal-score">${s.score}</span>
+      </summary>
+      <div class="signal-body">
+        <p><span class="tag">このシグナルが見るもの</span>${esc(s.description)}</p>
+        <p><span class="tag">この店舗での根拠</span>${esc(s.evidence)}</p>
+        <p class="alt-box"><span class="tag">サクラ以外の可能性</span>${esc(s.altExplanation)}</p>
+      </div>
+    </details>`;
+  }
+
+  function reviewItemHtml(rv) {
+    const date = rv.publishTime ? new Date(rv.publishTime) : null;
+    const dateStr = date && !isNaN(date)
+      ? `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`
+      : (rv.relative || "");
+    const text = (rv.text || "").trim();
+    return `
+    <article class="review-item">
+      <div class="review-head">
+        <span class="review-author">${esc(rv.author)}</span>
+        <span class="stars" aria-hidden="true">${starString(rv.rating || 0)}</span>
+        <span>${esc(dateStr)}</span>
+      </div>
+      <p class="review-text${text ? "" : " empty"}">${text ? esc(text) : "(本文なし・星のみの投稿)"}</p>
+    </article>`;
+  }
+
+  function disclaimerHtml() {
+    return `
+    <div class="result-disclaimer">
+      <strong>ご利用にあたって</strong> —
+      この結果は公開データからの統計的推定による参考値です。サクラ利用の事実を断定・証明するものではなく、
+      話題化・開店直後など、サクラ以外の理由でも同様のパターンは生じます。
+      店舗への誹謗中傷や営業妨害の目的での利用は固くお断りします。
+      最終的には、クチコミ本文とお店そのものをご自身の目でお確かめください。
+    </div>`;
+  }
+
+  function renderPlaceholder() {
+    $("#analysis-panel").innerHTML = `
+      <div class="panel-placeholder">
+        <span class="petal-icon">❀</span>
+        左のリストから店舗を選ぶと、クチコミの分析結果がここに表示されます。
+      </div>`;
+  }
+
+  /* ---------------- Google Maps 読み込み ---------------- */
+  function loadGoogleMaps(apiKey) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (ok) => { if (!settled) { settled = true; resolve(ok); } };
+
+      /* 認証失敗(無効キーなど)時に Google が呼ぶグローバルフック */
+      window.gm_authFailure = () => done(false);
+
+      /* 公式ブートストラップローダー */
+      ((g) => {
+        var h, a, k, p = "The Google Maps JavaScript API", c = "google", l = "importLibrary",
+          q = "__ib__", m = document, b = window;
+        b = b[c] || (b[c] = {});
+        var d = b.maps || (b.maps = {}), r = new Set(),
+          e = new URLSearchParams(),
+          u = () => h || (h = new Promise(async (f, n) => {
+            await (a = m.createElement("script"));
+            e.set("libraries", [...r] + "");
+            for (k in g) e.set(k.replace(/[A-Z]/g, (t) => "_" + t[0].toLowerCase()), g[k]);
+            e.set("callback", c + ".maps." + q);
+            a.src = "https://maps." + c + "apis.com/maps/api/js?" + e;
+            d[q] = f;
+            a.onerror = () => (h = n(Error(p + " could not load.")));
+            a.nonce = m.querySelector("script[nonce]")?.nonce || "";
+            m.head.append(a);
+          }));
+        d[l] ? console.warn(p + " only loads once. Ignoring:", g)
+             : (d[l] = (f, ...n) => r.add(f) && u().then(() => d[l](f, ...n)));
+      })({ key: apiKey, v: "weekly", language: "ja", region: "JP" });
+
+      Promise.all([
+        google.maps.importLibrary("maps"),
+        google.maps.importLibrary("places"),
+        google.maps.importLibrary("marker"),
+      ]).then(() => {
+        state.mapsReady = true;
+        done(true);
+      }).catch((err) => {
+        console.error(err);
+        done(false);
+      });
+
+      setTimeout(() => done(false), 12000);
+    });
+  }
+
+  async function renderMap() {
+    if (!state.mapsReady) return;
+    const withLoc = state.places.filter((p) => p.location);
+    const mapEl = $("#map");
+    if (withLoc.length === 0) { mapEl.classList.remove("visible"); return; }
+    mapEl.classList.add("visible");
+
+    const { Map } = await google.maps.importLibrary("maps");
+    const { AdvancedMarkerElement } = await google.maps.importLibrary("marker");
+
+    if (!state.map) {
+      state.map = new Map(mapEl, {
+        center: withLoc[0].location,
+        zoom: 14,
+        mapId: "DEMO_MAP_ID",
+        clickableIcons: false,
+      });
+    }
+    state.markers.forEach((m) => (m.map = null));
+    state.markers = [];
+
+    const bounds = new google.maps.LatLngBounds();
+    withLoc.forEach((p) => {
+      const marker = new AdvancedMarkerElement({
+        map: state.map,
+        position: p.location,
+        title: p.name,
+      });
+      marker.addListener("click", () => selectPlace(p.id));
+      state.markers.push(marker);
+      bounds.extend(p.location);
+    });
+    state.map.fitBounds(bounds, 40);
+  }
+
+  /* ---------------- モーダル ---------------- */
+  function setupModals() {
+    bindModalButtons(document);
+    document.querySelectorAll(".modal-backdrop").forEach((bk) => {
+      bk.addEventListener("click", (e) => { if (e.target === bk) closeModals(); });
+      bk.querySelector(".modal-close").addEventListener("click", closeModals);
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeModals();
+    });
+  }
+
+  function bindModalButtons(root) {
+    root.querySelectorAll("[data-modal]").forEach((btn) => {
+      if (btn._modalBound) return;
+      btn._modalBound = true;
+      btn.addEventListener("click", () => openModal(btn.dataset.modal));
+    });
+  }
+
+  function openModal(name) {
+    closeModals();
+    const bk = $(`#modal-${name}`);
+    if (bk) bk.classList.add("open");
+  }
+
+  function closeModals() {
+    document.querySelectorAll(".modal-backdrop.open").forEach((bk) => bk.classList.remove("open"));
+  }
+
+  /* ---------------- 設定 ---------------- */
+  function setupSettings() {
+    const input = $("#api-key-input");
+    const status = $("#settings-status");
+    input.value = localStorage.getItem(KEY_STORAGE) || "";
+
+    $("#save-key-btn").addEventListener("click", () => {
+      const key = input.value.trim();
+      if (!key) {
+        status.textContent = "APIキーを入力してください。";
+        status.className = "status-line error";
+        return;
+      }
+      localStorage.setItem(KEY_STORAGE, key);
+      status.textContent = "保存しました。ページを再読み込みして有効化します…";
+      status.className = "status-line ok";
+      setTimeout(() => location.reload(), 700);
+    });
+
+    $("#clear-key-btn").addEventListener("click", () => {
+      localStorage.removeItem(KEY_STORAGE);
+      input.value = "";
+      status.textContent = "キーを削除しました。デモモードに戻ります…";
+      status.className = "status-line ok";
+      setTimeout(() => location.reload(), 700);
+    });
+  }
+})();

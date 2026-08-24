@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>サクラメーター</title>
+<meta name="description" content="Googleマップの公開情報から、飲食店クチコミの「サクラ的パターン一致度」を参考値として表示するチェックツール。現役飲食店マネージャーが開発。">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌸</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Old+Mincho:wght@700&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="header-inner">
+    <div class="brand">
+      <span class="brand-mark"><span class="petal">❀</span> サクラメーター</span>
+      <span class="brand-sub">飲食店クチコミ健全性チェック β</span>
+    </div>
+    <button class="trust-badge" data-modal="operator" type="button">
+      ❀ 現役飲食店マネージャーが開発
+    </button>
+    <nav class="header-nav" aria-label="サイト内メニュー">
+      <button type="button" data-modal="method">計測方法</button>
+      <button type="button" data-modal="operator">運営者について</button>
+      <button type="button" data-modal="legal">免責・法的配慮</button>
+      <button type="button" data-modal="settings">設定</button>
+    </nav>
+  </div>
+</header>
+
+<section class="search-band">
+  <div class="search-inner">
+    <p class="search-lede">
+      気になる飲食店のクチコミが「サクラ的なパターン」とどれだけ一致するかを、
+      Googleマップの公開情報から統計的に推定して表示します。
+      結果は<strong>参考値</strong>であり、サクラ利用を断定するものではありません。
+    </p>
+    <form class="search-row" id="search-form">
+      <input type="search" id="search-input" placeholder="店名・エリア・ジャンルで検索(例: 渋谷 焼肉)"
+             aria-label="飲食店を検索" autocomplete="off">
+      <button type="submit">検索</button>
+    </form>
+    <div class="mode-banner" id="mode-banner"><!-- JSで描画 --></div>
+  </div>
+</section>
+
+<main class="main">
+  <aside>
+    <div id="map" aria-label="地図"></div>
+    <div class="results-head">
+      <h2 id="results-title">検索結果</h2>
+      <span class="results-attribution" id="results-attribution"></span>
+    </div>
+    <ul class="result-list" id="result-list"></ul>
+  </aside>
+
+  <section class="analysis-panel" id="analysis-panel" aria-live="polite">
+    <div class="panel-placeholder">
+      <span class="petal-icon">❀</span>
+      左のリストから店舗を選ぶと、クチコミの分析結果がここに表示されます。<br>
+      まずは上の検索窓から検索してみてください。
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="footer-inner">
+    <p><strong>サクラメーター β</strong> — 個人開発の非営利ツールです。</p>
+    <p>本サイトの表示はすべて公開情報に基づく統計的推定による「参考値」であり、特定の店舗によるサクラ(やらせクチコミ)利用の事実を断定・証明するものではありません。店舗の名誉・信用を損なう目的での利用はご遠慮ください。</p>
+    <p>クチコミデータは Google マップ(Google Maps Platform 公式API)より取得しています。クチコミの著作権は各投稿者に帰属します。</p>
+  </div>
+</footer>
+
+<!-- ============ モーダル: 計測方法 ============ -->
+<div class="modal-backdrop" id="modal-method" role="dialog" aria-modal="true" aria-labelledby="modal-method-title">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modal-method-title">計測方法(すべて公開しています)</h2>
+      <button class="modal-close" type="button" aria-label="閉じる">×</button>
+    </div>
+    <div class="modal-body">
+      <h3>1. データの取得元</h3>
+      <p>Google マップの公開情報のみを使用します。取得するのは「平均評価」「クチコミ件数」「クチコミ本文(Google Maps Platform 公式APIが返す関連度順・最大5件。投稿日時順ではありません)」「周辺店舗の評価」です。スクレイピング(規約違反となる自動収集)は行わず、取得したデータの保存・蓄積もしません。</p>
+
+      <h3>2. 5つのシグナル</h3>
+      <p>業界で知られるサクラ投稿の傾向をもとに、次の5つの観点をそれぞれ0〜100点で採点し、重み付き平均で合成します。</p>
+      <div class="method-table-wrap">
+        <table class="method-table">
+          <thead>
+            <tr><th>シグナル</th><th>重み</th><th>見ているもの</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>本文の定型度</td><td>40%</td><td>高評価クチコミが短文・定型フレーズ中心で、価格・料理名・注文内容などの具体性を欠いていないか。文面の使い回し(類似文)も検出します。</td></tr>
+            <tr><td>評価水準の偏り</td><td>15%</td><td>件数を考慮して補正した平均評価が、国内飲食店の一般的な水準の上限(3.9)からどれだけ上振れしているか。</td></tr>
+            <tr><td>周辺相場との乖離</td><td>15%</td><td>同じ検索結果に出た周辺店舗の評価分布と比べた突出度。</td></tr>
+            <tr><td>投稿時期の集中</td><td>15%</td><td>取得できたクチコミ(関連度順で選ばれた最大5件)の投稿日が不自然に短期間へ集中していないか。</td></tr>
+            <tr><td>★5と本文の乖離</td><td>15%</td><td>★5評価のクチコミのうち、本文が15文字未満(空を含む)のものの割合。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>「本文の定型度」を最も重視(40%)しているのは、開発者の店舗運営経験から、サクラ投稿の特徴が最も強く現れるのが本文だと考えているためです。単に評価が高いだけの店が高スコアにならないよう、意図的に評価点の重みは低く設定しています。上表の重みは設計上の既定値で、データ不足のシグナルがある店舗では実際の寄与度が変わります(各店舗の分析結果では「今回の寄与度」として実際に使われた割合を表示します)。</p>
+
+      <h3>3. 公平性のための仕組み</h3>
+      <ul>
+        <li><strong>データ不足のシグナルは除外</strong>: 判定に必要なデータが足りない観点は採点から外し、残りの重みを再配分します。</li>
+        <li><strong>緩和要因</strong>: 分析対象のクチコミに★3以下の率直な評価が混ざっている場合、自然なクチコミ分布の兆候としてスコアを15%引き下げます。</li>
+        <li><strong>代替説明の明示</strong>: 各シグナルには「サクラ以外でも同じパターンが出るケース」(テレビでの話題化、開店直後など)を必ず添えて表示します。</li>
+      </ul>
+
+      <h3>4. 信頼度について</h3>
+      <p>結果に添える「信頼度(低・中・高)」は、<strong>分析に使えたデータ量</strong>を表すものです。判定の正しさを保証するものではありません。Google公式APIの仕様上、クチコミ本文は関連度順(投稿日時順ではありません)で最大5件しか取得できないため、通常モードでの信頼度は最大でも「中」になります。</p>
+
+      <h3>5. この仕組みの限界(正直にお伝えします)</h3>
+      <ul>
+        <li>クチコミ本文の分析対象が最大5件に限られるうえ、Google公式APIは「関連度順」で返すため、必ずしも最新の投稿とは限りません。「投稿時期の集中」シグナルは、この5件の投稿日時のばらつきを見ているに過ぎず、店舗の真の直近投稿状況を厳密に反映しているわけではありません。</li>
+        <li>テレビ・SNSで話題になった直後の店は、サクラがいなくても似たパターン(短期集中・短文の絶賛)が生じます。</li>
+        <li>統計的な推定である以上、誤検知(健全な店に高いスコアが出ること)も、見逃しも起こり得ます。</li>
+        <li>したがって本ツールの結果は「クチコミを自分の目で確かめるきっかけ」としてご利用ください。最終的な判断の材料は、クチコミ本文そのものと、実際のお店です。</li>
+      </ul>
+
+      <div class="callout">
+        <p><strong>スコアの読み方</strong>: 0〜24「低い」/ 25〜49「やや注意」/ 50〜74「注意」/ 75〜100「強い注意」。いずれの帯でも、サクラ利用の断定はできません。</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ モーダル: 運営者について ============ -->
+<div class="modal-backdrop" id="modal-operator" role="dialog" aria-modal="true" aria-labelledby="modal-operator-title">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modal-operator-title">運営者について</h2>
+      <button class="modal-close" type="button" aria-label="閉じる">×</button>
+    </div>
+    <div class="modal-body">
+      <h3>現役の飲食店マネージャーが個人開発しています</h3>
+      <p>本ツールは、飲食店の店舗運営に現役で携わるマネージャーが個人で開発・運営しています。</p>
+      <p>店舗運営の現場では、クチコミがお店の集客を大きく左右する一方で、不自然な高評価が短期間に並ぶケースや、いわゆる「クチコミ対策」をうたう業者の存在も知られています。こうした<strong>現場で得た知見</strong>を、本ツールのシグナル設計と重み付けに反映しています。</p>
+      <ul>
+        <li>サクラ投稿は<strong>短期間に集中して</strong>反映される傾向がある → 「投稿時期の集中」シグナル</li>
+        <li>実体験のない投稿は<strong>具体性(価格・料理名・注文内容)を欠き、定型文になりやすい</strong> → 「本文の定型度」シグナルを最重視(40%)</li>
+        <li>本当の人気店のクチコミは、高評価でも<strong>率直な指摘や詳細な描写が混ざる</strong> → 低評価混在時の緩和要因</li>
+      </ul>
+
+      <h3>中立性について</h3>
+      <ul>
+        <li>特定の店舗を評価・非難することを目的としていません。</li>
+        <li>いかなる店舗・事業者からも、掲載や評価に関する金銭を受け取っていません。</li>
+        <li>算出方法はすべて「計測方法」ページで公開しており、恣意的な操作はありません。</li>
+      </ul>
+
+      <div class="callout sakura">
+        <p>飲食業界で働く一人として、真面目に商売をしているお店が正当に評価される環境をつくりたい——それがこのツールを作った動機です。</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ モーダル: 免責・法的配慮 ============ -->
+<div class="modal-backdrop" id="modal-legal" role="dialog" aria-modal="true" aria-labelledby="modal-legal-title">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modal-legal-title">免責事項・法的配慮</h2>
+      <button class="modal-close" type="button" aria-label="閉じる">×</button>
+    </div>
+    <div class="modal-body">
+      <h3>本ツールの表示について</h3>
+      <ul>
+        <li>表示される「サクラ的パターン一致度」は、公開情報に基づく<strong>統計的な推定による参考値</strong>です。特定店舗によるサクラ(やらせクチコミ)利用の事実を断定・証明するものではありません。</li>
+        <li>高いスコアが表示された場合でも、テレビ・SNSでの話題化、開店直後の来店集中など、サクラ以外の理由で同様のパターンが生じることがあります。</li>
+        <li>本ツールは特定の店舗の名誉・信用を毀損する意図を一切持ちません。結果を店舗への誹謗中傷・営業妨害の目的で利用することを固く禁じます。</li>
+        <li>本ツールの利用によって生じたいかなる損害についても、運営者は責任を負いません。</li>
+      </ul>
+
+      <h3>やらせクチコミ(ステマ)と法律</h3>
+      <p>2023年10月1日に施行された景品表示法の「ステルスマーケティング規制」により、事業者が第三者を装って行う表示(いわゆるサクラ・やらせクチコミの依頼を含む)は、不当表示として規制の対象となり得ます。消費者庁は運用基準を公表しています。</p>
+      <p>本ツールは、消費者がクチコミを鵜呑みにせず自分の目で確かめる<strong>きっかけを提供する</strong>ことを目的としており、特定店舗の違法行為を認定するものではありません。違法性の判断は行政・司法機関のみが行えます。</p>
+
+      <h3>データの取り扱い</h3>
+      <ul>
+        <li>店舗情報・クチコミは Google Maps Platform の公式APIを通じて取得し、規約に従い保存・蓄積はしません(表示のたびに取得します)。</li>
+        <li>クチコミの著作権は各投稿者に帰属します。本ツールは出典(Google マップ)を明示して表示しています。</li>
+        <li>デモモードで表示される店舗・クチコミ・投稿者名はすべて架空のものであり、実在の店舗・人物とは一切関係ありません。</li>
+      </ul>
+
+      <h3>店舗関係者の方へ</h3>
+      <p>本ツールは店舗を「ランキング化」「ブラックリスト化」する機能を持たず、利用者が検索した店舗についてのみ、その場で分析結果を表示します。表示内容に関するご意見・訂正のご要望を受け付ける専用の問い合わせ窓口は現時点で未整備です。整備が完了次第、こちらに連絡先を掲載します。</p>
+    </div>
+  </div>
+</div>
+
+<!-- ============ モーダル: 設定 ============ -->
+<div class="modal-backdrop" id="modal-settings" role="dialog" aria-modal="true" aria-labelledby="modal-settings-title">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modal-settings-title">設定 — Googleマップ連携</h2>
+      <button class="modal-close" type="button" aria-label="閉じる">×</button>
+    </div>
+    <div class="modal-body">
+      <p>Google Maps Platform の APIキーを設定すると、デモではなく<strong>全国の実在の飲食店</strong>を検索・分析できます。APIキーはこの端末(ブラウザ)にのみ保存され、外部へ送信されません。</p>
+
+      <div class="settings-field">
+        <label for="api-key-input">Google Maps Platform APIキー</label>
+        <input type="password" id="api-key-input" placeholder="AIza..." autocomplete="off">
+      </div>
+      <div class="settings-actions">
+        <button class="btn-primary" type="button" id="save-key-btn">保存して有効化</button>
+        <button class="btn-secondary" type="button" id="clear-key-btn">キーを削除してデモに戻す</button>
+      </div>
+      <p class="status-line" id="settings-status"></p>
+
+      <h3>無料で使うには</h3>
+      <ol>
+        <li><a href="https://console.cloud.google.com/" target="_blank" rel="noopener">Google Cloud Console</a> でプロジェクトを作成し、<strong>Maps JavaScript API</strong> と <strong>Places API (New)</strong> を有効化します(請求先アカウント〈支払い方法〉の登録が必要です)。</li>
+        <li>APIキーを作成し、「HTTPリファラー」でこのアプリのURLに制限をかけます。</li>
+        <li>2025年3月の料金体系変更により、無料枠はSKU(APIと取得フィールドの組み合わせ)ごとに独立しています。本アプリが呼び出す検索・詳細取得はいずれもEnterprise系SKU(無料枠 月1,000件)に該当するため、利用量によっては無料枠を超える場合があります。</li>
+        <li>想定外の課金を避けるため、Cloud Console の「割り当て(クォータ)」画面で各APIの1日あたりの上限を低めに設定することをおすすめします。ただし割り当てと課金は別系統のシステムのため、割り当て設定だけで課金ゼロを保証するものではありません。「お支払い → 予算とアラート」で¥0の予算アラートも必ず併用してください。</li>
+      </ol>
+      <p>詳しい手順・最新の料金情報は同梱の README.md および <a href="https://mapsplatform.google.com/pricing/" target="_blank" rel="noopener">Google Maps Platform 公式の料金ページ</a>でご確認ください。</p>
+    </div>
+  </div>
+</div>
+
+<script src="demo-data.js"></script>
+<script src="analyzer.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
