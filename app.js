@@ -1,6 +1,16 @@
 /* =========================================================================
  * サクラメーター app.js
  * UI描画 / デモモード / Google Maps Platform 連携
+ *
+ * 実店舗検索には3つのモードがある:
+ *   - "shared" (既定): Cloudflare Worker(代理サーバー)経由。訪問者は
+ *     何も設定せずに使える。運営者のAPIキーはWorker側に隠蔽されており、
+ *     月間利用回数もWorker側で完全にブロックされるため、運営者に
+ *     想定外の課金が発生することはない。
+ *   - "own" (任意・上級者向け): 自分のAPIキーを設定画面から登録すると、
+ *     共有の無料枠を消費せず、地図プレビューも使えるようになる。
+ *   - "demo": Workerが利用できない場合や、架空データのみのデモ配布版
+ *     (window.SAKURA_DEMO_ONLY = true)で使われる。
  * ========================================================================= */
 
 (() => {
@@ -8,15 +18,18 @@
 
   const KEY_STORAGE = "sakura_meter_api_key";
   const DEMO_ONLY = typeof window !== "undefined" && window.SAKURA_DEMO_ONLY === true;
+  const WORKER_BASE =
+    (typeof window !== "undefined" && window.SAKURA_WORKER_URL) ||
+    "https://sakura-meter-proxy.sakura-meter-proxy.workers.dev";
 
   const state = {
-    mode: "demo",          // "demo" | "live"
-    apiKey: null,
-    places: [],            // 正規化済み: {id,name,genre,area,address,rating,userRatingCount,priceLevel,reviews?,gmapsUri?,location?,_live?}
+    mode: "demo",          // "shared" | "own" | "demo"
+    places: [],            // 正規化済み: {id,name,genre,area,address,rating,userRatingCount,priceLevel,reviews?,gmapsUri?,location?,_live?,_shared?}
     selectedId: null,
     map: null,
     markers: [],
     mapsReady: false,
+    ownKeyError: null,
   };
 
   const $ = (sel) => document.querySelector(sel);
@@ -28,25 +41,32 @@
   /* ---------------- 初期化 ---------------- */
   document.addEventListener("DOMContentLoaded", async () => {
     setupModals();
+
     if (DEMO_ONLY) {
       /* 共有用デモ版: APIキー設定UIを取り除く */
       document.querySelectorAll('[data-modal="settings"]').forEach((el) => el.remove());
       const settingsModal = document.getElementById("modal-settings");
       if (settingsModal) settingsModal.remove();
+      state.mode = "demo";
     } else {
       setupSettings();
+      const ownKey = localStorage.getItem(KEY_STORAGE);
+      if (ownKey) {
+        renderModeBanner("loading");
+        const ok = await loadGoogleMaps(ownKey);
+        if (ok) {
+          state.mode = "own";
+        } else {
+          state.mode = "shared";
+          state.ownKeyError = "保存されているAPIキーでの接続に失敗しました。共有の無料枠でそのまま利用できます。";
+        }
+      } else {
+        state.mode = "shared";
+      }
     }
-    setupSearch();
 
-    state.apiKey = DEMO_ONLY ? null : localStorage.getItem(KEY_STORAGE);
-    let keyError = null;
-    if (state.apiKey) {
-      renderModeBanner("loading");
-      const ok = await loadGoogleMaps(state.apiKey);
-      state.mode = ok ? "live" : "demo";
-      if (!ok) keyError = "Google マップの読み込みに失敗しました。APIキーと有効化済みAPIをご確認ください。デモモードで動作します。";
-    }
-    renderModeBanner(null, keyError);
+    setupSearch();
+    renderModeBanner(null, state.ownKeyError);
 
     if (state.mode === "demo") {
       state.places = DEMO_PLACES.map(normalizeDemoPlace);
@@ -62,21 +82,24 @@
   function renderModeBanner(override, errorMsg) {
     const el = $("#mode-banner");
     if (override === "loading") {
-      el.innerHTML = `<span class="mode-chip live">Google連携</span><span>Googleマップを読み込んでいます…</span>`;
+      el.innerHTML = `<span class="mode-chip live">Google連携</span><span>保存済みのAPIキーを確認しています…</span>`;
       return;
     }
-    if (state.mode === "live") {
+    if (state.mode === "own") {
+      el.innerHTML = `
+        <span class="mode-chip live">Google連携中(自分のキー)</span>
+        <span>あなた専用のAPIキーで、Googleマップの実データを検索・分析します。</span>
+        <button class="linklike" type="button" data-modal="settings">設定</button>`;
+    } else if (state.mode === "shared") {
       el.innerHTML = `
         <span class="mode-chip live">Google連携中</span>
-        <span>Googleマップの実データを検索・分析します。</span>
+        <span>設定不要で、誰でも実店舗を検索・分析できます(共有の無料枠を利用)。</span>
         ${DEMO_ONLY ? "" : `<button class="linklike" type="button" data-modal="settings">設定</button>`}`;
     } else {
       el.innerHTML = `
         <span class="mode-chip demo">デモモード</span>
         <span>架空の店舗データで動作中です(実在の店舗ではありません)。</span>
-        ${DEMO_ONLY
-          ? `<span>実在の店舗を検索できる版は、配布ファイル(README.md)の手順でご利用いただけます。</span>`
-          : `<button class="linklike" type="button" data-modal="settings">APIキーを設定して実際の店舗を検索する</button>`}`;
+        ${DEMO_ONLY ? "" : `<button class="linklike" type="button" data-modal="settings">設定</button>`}`;
     }
     if (errorMsg) {
       const div = document.createElement("div");
@@ -87,13 +110,23 @@
     bindModalButtons(el);
   }
 
+  function showBannerNotice(msg) {
+    const el = $("#mode-banner");
+    const div = document.createElement("div");
+    div.className = "status-line error";
+    div.textContent = msg;
+    el.appendChild(div);
+  }
+
   /* ---------------- 検索 ---------------- */
   function setupSearch() {
     $("#search-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       const q = $("#search-input").value.trim();
-      if (state.mode === "live") {
-        await liveSearch(q);
+      if (state.mode === "own") {
+        await liveSearchOwn(q);
+      } else if (state.mode === "shared") {
+        await liveSearchShared(q);
       } else {
         demoSearch(q);
       }
@@ -116,7 +149,53 @@
     renderPlaceholder();
   }
 
-  async function liveSearch(q) {
+  /* ---- 共有Worker経由の検索(既定・訪問者は設定不要) ---- */
+  async function liveSearchShared(q) {
+    if (!q) {
+      renderResultsMessage("検索キーワードを入力してください(例: 渋谷 焼肉)。");
+      return;
+    }
+    renderResultsMessage("Googleマップを検索しています…", true);
+    try {
+      const res = await fetch(`${WORKER_BASE}/search?q=${encodeURIComponent(q)}`);
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 429 && data.error === "quota_exceeded") {
+        demoSearch(q);
+        $("#results-title").textContent = `「${q}」のデモ検索結果(無料枠上限のため)`;
+        showBannerNotice(data.message || "今月の無料検索枠の上限に達しました。");
+        return;
+      }
+      if (!res.ok) {
+        throw new Error((data && data.message) || `検索に失敗しました(HTTP ${res.status})。`);
+      }
+      state.places = (data.places || []).map(normalizeSharedSearchPlace);
+      state.selectedId = null;
+      renderResults(`「${q}」の検索結果`);
+      renderPlaceholder();
+    } catch (err) {
+      console.error(err);
+      renderResultsMessage("検索に失敗しました。しばらくしてからもう一度お試しください。");
+    }
+  }
+
+  function normalizeSharedSearchPlace(pl) {
+    return {
+      id: pl.id,
+      name: (pl.displayName && pl.displayName.text) || "(名称不明)",
+      genre: "",
+      area: "",
+      address: pl.formattedAddress || "",
+      rating: pl.rating ?? null,
+      userRatingCount: pl.userRatingCount ?? 0,
+      priceLevel: normalizePriceLevel(pl.priceLevel),
+      location: pl.location ? { lat: pl.location.latitude, lng: pl.location.longitude } : null,
+      _live: true,
+      _shared: true,
+    };
+  }
+
+  /* ---- 自分のAPIキー経由の検索(任意・上級者向け) ---- */
+  async function liveSearchOwn(q) {
     if (!q) {
       renderResultsMessage("検索キーワードを入力してください(例: 渋谷 焼肉)。");
       return;
@@ -174,7 +253,7 @@
   function renderResults(title) {
     $("#results-title").textContent = title || "検索結果";
     $("#results-attribution").textContent =
-      state.mode === "live" ? "検索結果: Google マップ提供" : "架空のサンプルデータ";
+      state.mode === "shared" || state.mode === "own" ? "検索結果: Google マップ提供" : "架空のサンプルデータ";
 
     const list = $("#result-list");
     if (state.places.length === 0) {
@@ -217,13 +296,29 @@
     state.selectedId = id;
     renderResults($("#results-title").textContent);
 
-    if (place._live && !place.reviews && !place._fetchingReviews) {
+    if (place._live && !place.reviews && !place.quotaExceeded && !place._fetchingReviews) {
       place._fetchingReviews = true;
       $("#analysis-panel").innerHTML = `<div class="loading">クチコミを取得して分析しています…</div>`;
       try {
-        await place._placeObj.fetchFields({ fields: ["reviews", "googleMapsURI"] });
-        place.gmapsUri = place._placeObj.googleMapsURI || null;
-        place.reviews = (place._placeObj.reviews || []).map(normalizeLiveReview);
+        if (place._shared) {
+          const res = await fetch(`${WORKER_BASE}/details/${encodeURIComponent(id)}`);
+          const data = await res.json().catch(() => ({}));
+          if (res.status === 429 && data.error === "quota_exceeded") {
+            place.quotaExceeded = true;
+            place.quotaMessage = data.message || "今月の無料分析枠の上限に達しました。";
+          } else if (!res.ok) {
+            throw new Error((data && data.message) || `取得に失敗しました(HTTP ${res.status})。`);
+          } else {
+            place.gmapsUri = data.googleMapsUri || null;
+            place.reviews = (data.reviews || []).map(normalizeSharedReview);
+            if (data.rating != null) place.rating = data.rating;
+            if (data.userRatingCount != null) place.userRatingCount = data.userRatingCount;
+          }
+        } else {
+          await place._placeObj.fetchFields({ fields: ["reviews", "googleMapsURI"] });
+          place.gmapsUri = place._placeObj.googleMapsURI || null;
+          place.reviews = (place._placeObj.reviews || []).map(normalizeLiveReview);
+        }
       } catch (err) {
         console.error(err);
         place.reviews = [];
@@ -235,6 +330,11 @@
 
     /* 選択後の非同期取得中に他の店舗が選ばれていたら、古い応答は描画しない */
     if (state.selectedId !== id) return;
+
+    if (place.quotaExceeded) {
+      renderQuotaExceededPanel(place);
+      return;
+    }
 
     try {
       const peers = state.places.filter((p) => p.id !== id);
@@ -248,6 +348,26 @@
     if (window.matchMedia("(max-width: 900px)").matches) {
       $("#analysis-panel").scrollIntoView({ behavior: "smooth", block: "start" });
     }
+  }
+
+  function renderQuotaExceededPanel(place) {
+    $("#analysis-panel").innerHTML = `
+      <header class="place-header"><h2>${esc(place.name)}</h2></header>
+      <div class="panel-placeholder">
+        ${esc(place.quotaMessage)}<br>
+        お急ぎの場合は、右上「設定」からご自身のAPIキーを登録すると、この上限に関係なくすぐに分析できます。
+      </div>`;
+  }
+
+  function normalizeSharedReview(r) {
+    const text = (r.text && r.text.text) || (r.originalText && r.originalText.text) || "";
+    return {
+      rating: r.rating ?? null,
+      text,
+      publishTime: r.publishTime || null,
+      author: (r.authorAttribution && r.authorAttribution.displayName) || "Googleユーザー",
+      relative: r.relativePublishTimeDescription || "",
+    };
   }
 
   function normalizeLiveReview(r) {
@@ -442,7 +562,7 @@
       </div>`;
   }
 
-  /* ---------------- Google Maps 読み込み ---------------- */
+  /* ---------------- Google Maps 読み込み(自分のAPIキーを使う場合のみ) ---------------- */
   function loadGoogleMaps(apiKey) {
     return new Promise((resolve) => {
       let settled = false;
@@ -554,7 +674,7 @@
     document.querySelectorAll(".modal-backdrop.open").forEach((bk) => bk.classList.remove("open"));
   }
 
-  /* ---------------- 設定 ---------------- */
+  /* ---------------- 設定(任意・上級者向け) ---------------- */
   function setupSettings() {
     const input = $("#api-key-input");
     const status = $("#settings-status");
@@ -576,7 +696,7 @@
     $("#clear-key-btn").addEventListener("click", () => {
       localStorage.removeItem(KEY_STORAGE);
       input.value = "";
-      status.textContent = "キーを削除しました。デモモードに戻ります…";
+      status.textContent = "キーを削除しました。共有の無料枠に戻ります…";
       status.className = "status-line ok";
       setTimeout(() => location.reload(), 700);
     });

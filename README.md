@@ -22,13 +22,42 @@ cd "/Users/katagirijakutou/飲食店　サクラチェッカー" && python3 -m h
 ブラウザで <http://localhost:8000> を開いてください。
 デモの店舗・クチコミ・投稿者名はすべて架空で、実在の店舗とは関係ありません。
 
-## 2. 実際の店舗を検索する(Googleマップ連携)
+## 2. 実際の店舗を検索する(誰でも設定不要)
 
-Google Maps Platform のAPIキーを設定すると、全国の実在の飲食店を検索して分析できます。
-**この手順は、Googleアカウントへのログインと請求先アカウント(支払い方法)の登録を伴うため、
-ご自身で行っていただく必要があります**(セキュリティ上、第三者が代行できない操作です)。
+公開版(<https://wakuwaku-labs.github.io/sakura-meter/>)は、**訪問者が何も設定しなくても**
+全国の実在の飲食店を検索・分析できます。運営者が用意した無料の代理サーバー(Cloudflare Workers)
+経由でGoogleマップに接続する仕組みになっており、費用は運営者が負担します。
 
-### APIキーの取得手順
+### アーキテクチャ(なぜ0円を保証できるか)
+
+```
+訪問者のブラウザ ──▶ GitHub Pages(画面・静的ファイル)
+                          │ fetch()
+                          ▼
+                Cloudflare Worker(代理サーバー・無料)
+                          │ 月間カウンタをKVでチェック
+                          │ 上限内のみ中継
+                          ▼
+                Google Places API(運営者のキーはWorker内の
+                シークレットとしてのみ保持。ブラウザには一切渡らない)
+```
+
+- 運営者のGoogle Maps APIキーは **Cloudflare Workerの環境変数(シークレット)としてのみ存在**し、
+  ブラウザ・HTMLソース・GitHubリポジトリのどこにも含まれません。
+- 各リクエストの前にWorkerが**月間の利用回数をKV(Cloudflareのキーバリューストア)でチェック**し、
+  上限(検索・分析それぞれ月900件、Google無料枠1,000件に対し余裕を持たせた値)に達したら
+  Google APIへは中継せず、その場でエラーを返します。**割り当て超過のリクエストは課金対象になりません**
+  (Googleへの通信自体が発生しないため)。
+- Cloudflare Workers・KVともに無料枠内で運用しており、クレジットカード登録も不要です
+  (無料枠: リクエスト10万件/日、KV読み取り10万件/日・書き込み1,000件/日)。
+
+上限に達した月は、自動的にデモデータでの表示に切り替わり、翌月また利用できます。
+
+### 自分専用のAPIキーを使いたい場合(任意)
+
+共有枠を消費したくない方、地図プレビュー機能を使いたい方は、右上「設定」から
+ご自身のGoogle Maps Platform APIキーを登録できます。この場合、共有の代理サーバーは使わず、
+従来どおりブラウザから直接Googleへ問い合わせます。
 
 1. [Google Cloud Console](https://console.cloud.google.com/) で Google アカウントにログインし、新しいプロジェクトを作成
 2. 「お支払い」で請求先アカウント(支払い方法)を登録(無料枠の範囲内でもこの設定は必須です)
@@ -37,45 +66,18 @@ Google Maps Platform のAPIキーを設定すると、全国の実在の飲食�
    - **Places API (New)**
 4. 「APIとサービス → 認証情報」で **APIキー** を作成
 5. キーに制限をかける(推奨)
-   - アプリケーションの制限: 「ウェブサイト」→ 実際に使うURLを登録
-     - 公開版を使う場合: `https://wakuwaku-labs.github.io/sakura-meter/*`
-     - ローカルで試す場合: `http://localhost:8000/*`
+   - アプリケーションの制限: 「ウェブサイト」→ `https://wakuwaku-labs.github.io/sakura-meter/*`
    - APIの制限: 上記2つのAPIのみ許可
-6. 公開版(<https://wakuwaku-labs.github.io/sakura-meter/>)を開き、右上の「設定」からAPIキーを貼り付けて保存
+6. 公開版を開き、右上の「設定」からAPIキーを貼り付けて保存
 
-APIキーはお使いのブラウザ(localStorage)にのみ保存され、Google以外の外部には送信されません。
-他の人がこの公開版を訪れても、それぞれ自分のAPIキーを設定しない限り実店舗検索はできず
-(自動的にデモモードになります)、あなたのAPI利用枠が他の訪問者に消費されることはありません。
+APIキーはお使いのブラウザ(localStorage)にのみ保存され、外部へは送信されません。
 
-### 無料で運用するために(重要)
+### 無料枠についての補足(自分のキーを使う場合)
 
-- **2025年3月1日の料金体系変更**により、Google Maps Platform の無料枠は月額$200クレジットのプール制から、
-  **SKU(API×リクエストフィールドの組み合わせ)ごとに独立した月間無料呼び出し件数制**に変わりました。
-  無料件数はSKUの階層(Essentials / Pro / Enterprise)によって異なり、それぞれ独立してカウントされます
-  (余った枠を他のSKUに融通することはできません)。
-  - Essentials系SKU: **10,000件/月**まで無料
-  - Pro系SKU: **5,000件/月**まで無料
-  - Enterprise系SKU: **1,000件/月**まで無料
-- **本アプリが実際に呼び出す主なリクエストは、いずれも無料枠が最も小さいEnterprise系SKUに該当します**。
-  - 検索(Text Search)は `rating` / `userRatingCount` / `priceLevel` を取得しているため、
-    「Places API Text Search Enterprise」SKU(無料1,000件/月)が対象になります。
-  - 店舗選択時の詳細取得(Place Details)は `reviews` を取得しているため、
-    「Places API Place Details Enterprise + Atmosphere」SKU(無料1,000件/月)が対象になります。
-  - そのため「1日数十回」の利用でも月換算で1,000件を超える場合があり、必ずしも無料枠内に収まるとは限りません。
-- **APIキーを有効化するには、Google Cloud プロジェクトに請求先アカウント(支払い方法)を登録する必要があります**
-  (無料枠の範囲内であっても、この設定自体は必須です)。
-- 想定外の課金を避けるため、Cloud Console の「IAMと管理 → 割り当て」で
-  各API(Places API (New) / Maps JavaScript API)の**1日あたりのリクエスト上限を低めに設定**することをおすすめします。
-  ただし [Google公式ドキュメント](https://docs.cloud.google.com/apis/docs/capping-api-usage) によれば、
-  割り当て(Quota)システムと課金(Billing)システムは技術的に分離しており、
-  割り当て超過の検知と実際の制限実行の間にはラグが生じ得るため、**割り当て設定だけで課金ゼロを保証するものではありません**。
-  割り当ては無料枠より少し低めに設定し、次の予算アラートを必ず併用してください。
-- **予算アラート(「お支払い → 予算とアラート」で ¥0 予算を作成)は、ほぼ必須の安全策です**
-  (ただしアラートも通知に過ぎず、課金データの反映には最大48時間程度のタイムラグがあり得ます)。
-- 最新の無料枠・料金・SKU区分は必ず公式ページでご確認ください:
-  - 変更の概要: <https://developers.google.com/maps/billing-and-pricing/march-2025>
-  - SKU別の詳細: <https://developers.google.com/maps/billing-and-pricing/sku-details>
-  - 料金一覧: <https://mapsplatform.google.com/pricing/>
+- 2025年3月の料金体系変更により、Google Maps Platform の無料枠はSKU単位の月間無料呼び出し件数制です(Enterprise系SKUは月1,000件)。
+  詳細: <https://mapsplatform.google.com/pricing/>
+- 想定外の課金を避けるため、Cloud Console の「割り当て」画面で1日あたりの上限を低めに設定し、
+  ¥0の予算アラートを併用することをおすすめします。
 
 ### 1回の操作で使われるAPIの目安
 
@@ -83,9 +85,11 @@ APIキーはお使いのブラウザ(localStorage)にのみ保存され、Google
 |---|---|
 | 検索1回 | Places API Text Search × 1 |
 | 店舗を選択して分析 | Places API Place Details(クチコミ取得)× 1 |
-| 地図表示 | Maps JavaScript API のマップロード |
+| 地図表示(自分のキー使用時のみ) | Maps JavaScript API のマップロード |
 
 ## 3. 公開について
+
+### 画面(GitHub Pages)
 
 GitHub Pages(無料)に公開済みです: <https://wakuwaku-labs.github.io/sakura-meter/>
 (リポジトリ: <https://github.com/wakuwaku-labs/sakura-meter>)
@@ -98,6 +102,26 @@ git add -A && git commit -m "更新内容" && git push
 
 数十秒〜1分ほどでGitHub Pagesに反映されます。
 
+### 代理サーバー(Cloudflare Workers)
+
+`cf-worker/` ディレクトリに実装されています。デプロイ済みURL: `https://sakura-meter-proxy.sakura-meter-proxy.workers.dev`
+
+更新を反映するには:
+
+```bash
+cd cf-worker
+npx wrangler deploy
+```
+
+Google Maps APIキー(シークレット)の再設定が必要な場合:
+
+```bash
+cd cf-worker
+npx wrangler secret put GOOGLE_MAPS_API_KEY
+```
+
+月間の利用上限(既定: 検索・分析それぞれ月900件)は `cf-worker/src/index.js` の `MONTHLY_CAPS` で調整できます。
+
 ## 4. ファイル構成
 
 | ファイル | 役割 |
@@ -105,8 +129,9 @@ git add -A && git commit -m "更新内容" && git push
 | `index.html` | アプリ本体(計測方法・運営者・免責の説明を含む) |
 | `style.css` | スタイル(ライト/ダークテーマ対応) |
 | `analyzer.js` | 分析エンジン(5シグナルの採点・合成ロジック) |
-| `app.js` | UI描画・検索・Google Maps Platform 連携 |
+| `app.js` | UI描画・検索・Google Maps Platform 連携(共有プロキシ/自分のキーの両対応) |
 | `demo-data.js` | デモ用の架空店舗データ |
+| `cf-worker/` | 代理サーバー(Cloudflare Worker)。運営者のAPIキーを保持し、月間利用回数を制御 |
 
 ## 5. スコアの算出方法(概要)
 

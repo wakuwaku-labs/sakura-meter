@@ -1,0 +1,8 @@
+name = "sakura-meter-proxy"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+
+# `wrangler kv namespace create QUOTA_KV` で作成したIDに置き換えてください
+[[kv_namespaces]]
+binding = "QUOTA_KV"
+id = "fa278a6095964fb3be75ee6c9c021731"

@@ -182,6 +182,7 @@
       <h3>データの取り扱い</h3>
       <ul>
         <li>店舗情報・クチコミは Google Maps Platform の公式APIを通じて取得し、規約に従い保存・蓄積はしません(表示のたびに取得します)。</li>
+        <li>既定モードでは、運営者が管理する代理サーバー(Cloudflare Workers)を経由してGoogleのAPIに問い合わせます。代理サーバーは「今月あと何回問い合わせたか」という<strong>回数のみ</strong>を一時的に記録しており、検索語やクチコミ本文そのものは保存しません。</li>
         <li>クチコミの著作権は各投稿者に帰属します。本ツールは出典(Google マップ)を明示して表示しています。</li>
         <li>デモモードで表示される店舗・クチコミ・投稿者名はすべて架空のものであり、実在の店舗・人物とは一切関係ありません。</li>
       </ul>
@@ -200,19 +201,27 @@
       <button class="modal-close" type="button" aria-label="閉じる">×</button>
     </div>
     <div class="modal-body">
-      <p>Google Maps Platform の APIキーを設定すると、デモではなく<strong>全国の実在の飲食店</strong>を検索・分析できます。APIキーはこの端末(ブラウザ)にのみ保存され、外部へ送信されません。</p>
+      <p><strong>このアプリは、何も設定しなくてもそのまま全国の実在の飲食店を検索・分析できます。</strong>
+      運営者が用意した代理サーバー経由でGoogleマップに接続しており、費用は運営者が負担し、利用者に金銭的な負担は一切発生しません。</p>
+
+      <div class="callout">
+        <p>代理サーバーには月間の利用回数上限があります。上限に達した場合、その月はデモデータでの表示に自動的に切り替わり、翌月また実店舗検索が利用できます(運営者に想定外の課金が発生することはありません)。</p>
+      </div>
+
+      <h3>自分専用のAPIキーを使いたい場合(任意)</h3>
+      <p>共有枠を消費したくない方や、地図プレビュー機能を使いたい方は、ご自身のGoogle Maps Platform APIキーを登録できます。APIキーはこの端末(ブラウザ)にのみ保存され、外部へ送信されません。登録すると、共有枠に関係なくご自身のAPI利用枠の範囲で利用できます。</p>
 
       <div class="settings-field">
-        <label for="api-key-input">Google Maps Platform APIキー</label>
+        <label for="api-key-input">Google Maps Platform APIキー(任意)</label>
         <input type="password" id="api-key-input" placeholder="AIza..." autocomplete="off">
       </div>
       <div class="settings-actions">
         <button class="btn-primary" type="button" id="save-key-btn">保存して有効化</button>
-        <button class="btn-secondary" type="button" id="clear-key-btn">キーを削除してデモに戻す</button>
+        <button class="btn-secondary" type="button" id="clear-key-btn">キーを削除して共有枠に戻す</button>
       </div>
       <p class="status-line" id="settings-status"></p>
 
-      <h3>無料で使うには</h3>
+      <h3>自分のAPIキーを無料で取得するには</h3>
       <ol>
         <li><a href="https://console.cloud.google.com/" target="_blank" rel="noopener">Google Cloud Console</a> でプロジェクトを作成し、<strong>Maps JavaScript API</strong> と <strong>Places API (New)</strong> を有効化します(請求先アカウント〈支払い方法〉の登録が必要です)。</li>
         <li>APIキーを作成し、「HTTPリファラー」でこのアプリのURLに制限をかけます。</li>
