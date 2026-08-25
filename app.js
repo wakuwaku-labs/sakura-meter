@@ -454,6 +454,7 @@
             <span>${esc(r.confidence.reasons.join(" / "))}</span>
           </div>
           <button class="method-link" type="button" data-modal="method">この数値の算出方法を見る</button>
+          ${r.convergence && r.convergence.note ? `<p class="relief-note">${esc(r.convergence.note)}</p>` : ""}
           ${r.relief ? `<p class="relief-note">${esc(r.relief.note)}</p>` : ""}
         </div>
       </div>`;
@@ -465,6 +466,9 @@
           ${r.signals.map(signalItemHtml).join("")}
         </div>
       </section>`;
+
+    const checklistHtml = checklistSectionHtml(r);
+    const distHtml = distributionSectionHtml(place, r);
 
     const reviews = place.reviews || [];
     const reviewsHtml = `
@@ -480,8 +484,10 @@
         </div>
       </section>`;
 
-    panel.innerHTML = headerHtml + gaugeHtml + signalsHtml + reviewsHtml + disclaimerHtml();
+    panel.innerHTML = headerHtml + gaugeHtml + checklistHtml + signalsHtml +
+                      distHtml + reviewsHtml + disclaimerHtml();
     bindModalButtons(panel);
+    bindDistributionForm(place);
 
     /* ゲージのアニメーション(reduced-motion環境ではCSS側で無効化) */
     requestAnimationFrame(() => {
@@ -492,13 +498,212 @@
     });
   }
 
+  /* ---- チェックリスト(4軸12項目) ---------------------------------- */
+  const CHECK_STATE_META = {
+    hit:     { mark: "●", cls: "hit",     label: "該当" },
+    clear:   { mark: "—", cls: "clear",   label: "該当なし" },
+    unknown: { mark: "?", cls: "unknown", label: "判定不可" },
+  };
+
+  function checklistSectionHtml(r) {
+    const cl = r.checklist;
+    if (!cl || cl.items.length === 0) return "";
+
+    /* 軸ごとにまとめる(表示順は Analyzer の並びを保つ) */
+    const groups = [];
+    cl.items.forEach((it) => {
+      let g = groups.find((x) => x.axis === it.axis);
+      if (!g) groups.push((g = { axis: it.axis, items: [] }));
+      g.items.push(it);
+    });
+
+    const verdict = cl.hits >= 3
+      ? `<strong>${cl.hits}項目に該当</strong>しています。実務上は「3項目以上でサクラの疑いが高い」とされる目安を超えています。`
+      : cl.hits === 0
+        ? `該当した項目は<strong>ありません</strong>。`
+        : `該当は<strong>${cl.hits}項目</strong>で、目安とされる3項目には達していません。`;
+
+    return `
+      <section class="checklist-section">
+        <h3>チェックリスト
+          <span class="section-note">判定できた${cl.judged}項目中 ${cl.hits}項目に該当</span>
+        </h3>
+        <p class="checklist-verdict">${verdict} 1つの兆候だけでは判断できません。重なりの多さで読んでください。</p>
+        <div class="checklist-groups">
+          ${groups.map((g) => `
+            <div class="checklist-group">
+              <h4>${esc(g.axis)}</h4>
+              <ul>
+                ${g.items.map((it) => {
+                  const m = CHECK_STATE_META[it.state];
+                  return `<li class="check-item ${m.cls}">
+                    <span class="check-mark" aria-hidden="true">${m.mark}</span>
+                    <span class="check-body">
+                      <span class="check-label">${esc(it.label)}</span>
+                      <span class="check-detail">${esc(it.detail)}</span>
+                    </span>
+                    <span class="visually-hidden">${m.label}</span>
+                  </li>`;
+                }).join("")}
+              </ul>
+            </div>`).join("")}
+        </div>
+      </section>`;
+  }
+
+  /* ---- 星の分布の手入力(精度向上オプション) ------------------------ */
+  const DIST_STARS = [5, 4, 3, 2, 1];
+
+  /* 平均評価から、それらしい初期分布を生成してスライダーの出発点にする */
+  function seedDistribution(rating) {
+    const R = rating == null ? 4.0 : rating;
+    const w = {};
+    DIST_STARS.forEach((k) => {
+      w[k] = Math.exp(-Math.abs(k - R) * 1.5);
+    });
+    w[1] = Math.max(w[1], 0.03); // ★1は常に少し存在するのが普通
+    const max = Math.max(...DIST_STARS.map((k) => w[k]));
+    const out = {};
+    DIST_STARS.forEach((k) => (out[k] = Math.max(1, Math.round((w[k] / max) * 100))));
+    return out;
+  }
+
+  function distributionSectionHtml(place, r) {
+    const count = place.userRatingCount || 0;
+    if (count < 20) {
+      return `
+        <section class="dist-section">
+          <h3>星の分布 <span class="section-note">この店舗では利用できません</span></h3>
+          <p class="dist-lede">総クチコミ数が${count}件と少なく、分布の形から判断すると誤差が大きすぎるため、この入力は無効にしています(20件以上で利用できます)。</p>
+        </section>`;
+    }
+    const applied = place.ratingDistribution || null;
+    const vals = applied ? normalizeToSliders(applied) : seedDistribution(place.rating);
+
+    return `
+      <section class="dist-section">
+        <details class="dist-details"${applied ? "" : " open"}>
+          <summary>
+            <span class="dist-title">星の分布を入力して精度を上げる</span>
+            <span class="dist-state ${applied ? "on" : "off"}">${applied ? "入力済み — 分析に反映中" : "未入力 — 1つのシグナルが対象外です"}</span>
+          </summary>
+          <div class="dist-body">
+            <p class="dist-lede">
+              Googleの公式APIは<strong>星ごとの件数(分布)を提供していません</strong>。
+              Googleマップの店舗ページに出ている棒グラフを見ながら、5本のバーの長さを近づけてください。
+              「★5と★1に割れて中間が凹むお椀型」は、実証研究で偽レビューに特徴的とされる形です。
+            </p>
+            <div class="dist-rows">
+              ${DIST_STARS.map((k) => `
+                <label class="dist-row">
+                  <span class="dist-star">★${k}</span>
+                  <input type="range" min="0" max="100" step="1" value="${vals[k]}" data-star="${k}">
+                  <output class="dist-out" data-out="${k}">${vals[k]}</output>
+                </label>`).join("")}
+            </div>
+            <div class="dist-readout" id="dist-readout"></div>
+            <div class="dist-actions">
+              <button class="btn-primary" type="button" id="dist-apply">この分布で再分析</button>
+              ${applied ? `<button class="btn-secondary" type="button" id="dist-clear">入力を取り消す</button>` : ""}
+            </div>
+            <p class="dist-note">入力値はこの画面の中だけで使われ、保存も送信もされません。</p>
+          </div>
+        </details>
+      </section>`;
+  }
+
+  /* 保存済みの件数分布を 0-100 のスライダー値に戻す */
+  function normalizeToSliders(dist) {
+    const raw = {};
+    DIST_STARS.forEach((k) => (raw[k] = Number(dist[k] ?? 0)));
+    const max = Math.max(...DIST_STARS.map((k) => raw[k]), 1);
+    const out = {};
+    DIST_STARS.forEach((k) => (out[k] = Math.round((raw[k] / max) * 100)));
+    return out;
+  }
+
+  function bindDistributionForm(place) {
+    const panel = $("#analysis-panel");
+    const sliders = [...panel.querySelectorAll('.dist-row input[type="range"]')];
+    if (sliders.length === 0) return;
+
+    const readCurrent = () => {
+      const d = {};
+      sliders.forEach((el) => (d[el.dataset.star] = Number(el.value)));
+      return d;
+    };
+
+    const refresh = () => {
+      const d = readCurrent();
+      sliders.forEach((el) => {
+        const out = panel.querySelector(`[data-out="${el.dataset.star}"]`);
+        if (out) out.textContent = el.value;
+      });
+      const total = DIST_STARS.reduce((s, k) => s + d[k], 0);
+      const readout = panel.querySelector("#dist-readout");
+      if (!readout) return;
+      if (total <= 0) {
+        readout.innerHTML = `<span class="dist-warn">すべて0では分布になりません。バーの長さを設定してください。</span>`;
+        return;
+      }
+      const mean = DIST_STARS.reduce((s, k) => s + d[k] * k, 0) / total;
+      const p5 = (d[5] / total) * 100;
+      const actual = place.rating;
+      const diff = actual != null ? mean - actual : null;
+      const ok = diff != null && Math.abs(diff) <= 0.1;
+      readout.innerHTML = `
+        <span>この分布から計算した平均: <strong>${mean.toFixed(2)}</strong></span>
+        ${actual != null ? `<span>実際の表示評価: <strong>${actual.toFixed(1)}</strong></span>` : ""}
+        ${diff != null
+          ? `<span class="dist-fit ${ok ? "ok" : "off"}">${ok
+              ? "一致しています(この分布で問題ありません)"
+              : `${diff > 0 ? "高すぎます" : "低すぎます"}(差 ${diff.toFixed(2)}) — バーの長さを調整してください`}</span>`
+          : ""}
+        <span class="dist-p5">★5の割合: ${p5.toFixed(1)}%</span>`;
+    };
+
+    sliders.forEach((el) => el.addEventListener("input", refresh));
+    refresh();
+
+    const applyBtn = panel.querySelector("#dist-apply");
+    if (applyBtn) {
+      applyBtn.addEventListener("click", () => {
+        const d = readCurrent();
+        const total = DIST_STARS.reduce((s, k) => s + d[k], 0);
+        if (total <= 0) return;
+        /* スライダーの相対値を、実際の総クチコミ数に合わせた件数へ変換 */
+        const n = place.userRatingCount || 0;
+        const counts = {};
+        DIST_STARS.forEach((k) => (counts[k] = Math.round((d[k] / total) * n)));
+        place.ratingDistribution = counts;
+        reanalyze(place);
+      });
+    }
+    const clearBtn = panel.querySelector("#dist-clear");
+    if (clearBtn) {
+      clearBtn.addEventListener("click", () => {
+        delete place.ratingDistribution;
+        reanalyze(place);
+      });
+    }
+  }
+
+  function reanalyze(place) {
+    const peers = state.places.filter((p) => p.id !== place.id);
+    try {
+      renderAnalysis(place, Analyzer.analyze(place, peers));
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
   function signalItemHtml(s) {
     if (!s.included) {
       const baseWeightPct = Math.round(s.weight * 100);
       return `
       <details class="signal-item">
         <summary class="signal-summary">
-          <span class="signal-name">${esc(s.label)}<span class="signal-weight">本来の重み${baseWeightPct}%(今回は対象外)</span></span>
+          <span class="signal-name">${esc(s.label)}<span class="signal-weight"><span class="axis-chip">${esc(s.axis)}</span>本来の重み${baseWeightPct}%(今回は対象外)</span></span>
           <span class="signal-bar-track"><span class="signal-bar-fill" style="width:0%"></span></span>
           <span class="signal-score na">対象外</span>
         </summary>
@@ -514,7 +719,7 @@
     return `
     <details class="signal-item">
       <summary class="signal-summary">
-        <span class="signal-name">${esc(s.label)}<span class="signal-weight">今回の寄与度${weightPct}%</span></span>
+        <span class="signal-name">${esc(s.label)}<span class="signal-weight"><span class="axis-chip">${esc(s.axis)}</span>今回の寄与度${weightPct}%</span></span>
         <span class="signal-bar-track"><span class="signal-bar-fill" style="width:${s.score}%"></span></span>
         <span class="signal-score">${s.score}</span>
       </summary>
