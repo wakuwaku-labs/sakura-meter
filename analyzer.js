@@ -532,7 +532,7 @@ const Analyzer = (() => {
    * また、全体幅ではなく「3件が収まる最短の窓」を主指標にしている。
    * 全体幅だけを見ると「3年に散らばる5件のうち3件だけが同じ週に固まって
    * いる」という、業者発注に最も典型的なパターンを取りこぼすため。 */
-  function scoreBurst(reviews, count, recent) {
+  function scoreBurst(reviews, count, recent, now) {
     const dated = (reviews || [])
       .map((r) => ({
         date: r.publishTime ? new Date(r.publishTime) : null,
@@ -552,12 +552,49 @@ const Analyzer = (() => {
     const days = win.days;
     const totalSpanDays = Math.round((dated[0].date - dated[dated.length - 1].date) / DAY_MS);
 
-    let score = piecewise(days, [
-      [3, 92], [7, 82], [14, 70], [30, 55], [90, 35], [180, 20], [365, 10], [730, 5],
-    ]);
+    /* --- 投稿ペースによる正規化 ---
+     * 「3件が何日に収まったか」を絶対値で見ると、クチコミが多い人気店ほど
+     * 高く出てしまう。1日4件のペースで投稿がある店なら、高評価3件が2日に
+     * 収まるのはむしろ遅いくらいで、集中でも何でもない。実際、★4.7/743件
+     * の実在店で、見込みより3.7倍ゆっくりな投稿が100点と判定されていた。
+     *
+     * そこで「その店のペースなら高評価3件は何日で集まるはずか」を見積もり、
+     * 観測値がそれよりどれだけ詰まっているかで採点する。
+     *   burstiness = 見込み日数 / 観測日数
+     *     1未満 … ペース相応かそれより遅い(集中ではない)
+     *     2以上 … ペースの倍の速さで積み上がっている
+     *
+     * 生涯ペースは「総クチコミ数 ÷ 観測できる最古の投稿からの日数」。
+     * 実際の開店はもっと前のはずなので、この推定はペースを高めに見積もる
+     * = バースト判定に対して保守的に働く。
+     * 履歴が短すぎる店では推定が乱暴になるため、従来の絶対値判定に戻す。 */
+    const allDated = (reviews || [])
+      .map((r) => ({ date: r.publishTime ? new Date(r.publishTime) : null, rating: r.rating || 0 }))
+      .filter((x) => x.date && !isNaN(x.date.getTime()))
+      .sort((a, b) => b.date - a.date);
+    const oldestDate = allDated.length ? allDated[allDated.length - 1].date : dated[dated.length - 1].date;
+    const historyDays = now ? (now - oldestDate) / DAY_MS : 0;
+    const canNormalize = (count || 0) >= 20 && historyDays >= 60;
 
-    /* 総クチコミ数が多い店ほど「関連度上位が数日に固まる」ことは起きにくい */
-    if ((count || 0) >= 100 && days <= 14) score += 6;
+    let score;
+    let burstiness = null;
+    let expectedDays = null;
+    if (canNormalize) {
+      const lifetimeRate = count / historyDays;                  // 件/日
+      const pHigh = clamp(dated.length / Math.max(allDated.length, 1), 0.2, 1);
+      expectedDays = 2 / Math.max(lifetimeRate * pHigh, 1e-6);   // 3件 = 2区間
+      burstiness = expectedDays / Math.max(days, 0.5);
+      score = piecewise(burstiness, [
+        [0.5, 0], [1, 22], [2, 48], [4, 72], [8, 92],
+      ]);
+    } else {
+      score = piecewise(days, [
+        [3, 92], [7, 82], [14, 70], [30, 55], [90, 35], [180, 20], [365, 10], [730, 5],
+      ]);
+    }
+
+    /* 正規化していない場合のみ。正規化時はペースの効果を織り込み済み */
+    if (!canNormalize && (count || 0) >= 100 && days <= 14) score += 6;
 
     /* 全期間に散らばる中の一部だけが固まっている場合を明示 */
     const isolatedCluster = totalSpanDays > days * 6 && days <= 30;
@@ -582,6 +619,15 @@ const Analyzer = (() => {
     const from = win.items[win.items.length - 1].date;
     const to = win.items[0].date;
     let ev = `取得できた高評価クチコミ${dated.length}件のうち、最も密集する3件は ${fmtDate(from)} 〜 ${fmtDate(to)} の${Math.round(days)}日間に投稿されています(高評価全体の投稿期間は${totalSpanDays}日)。`;
+    if (canNormalize) {
+      const rate = count / historyDays;
+      ev += ` この店舗には観測できる範囲で1日あたり約${rate.toFixed(1)}件のペースでクチコミが付いており、そのペースなら高評価3件は約${expectedDays.toFixed(1)}日で集まる見込みです。`;
+      ev += burstiness >= 2
+        ? `観測された${Math.round(days)}日間は見込みの${burstiness.toFixed(1)}倍の速さで、この店舗のペースから外れた集中といえます。`
+        : burstiness >= 1
+          ? `観測された${Math.round(days)}日間は見込みとほぼ同じで、この店舗のペースの範囲内です。`
+          : `観測された${Math.round(days)}日間は見込みより${(1 / burstiness).toFixed(1)}倍ゆっくりで、集中とはいえません。`;
+    }
     if (isolatedCluster) {
       ev += " 全体としては長期間に分布する中で、一部だけが固まっている形です。";
     }
@@ -598,7 +644,7 @@ const Analyzer = (() => {
       score,
       included: true,
       evidence: ev,
-      detail: { days, totalSpanDays, isolatedCluster, n: dated.length },
+      detail: { days, totalSpanDays, isolatedCluster, n: dated.length, burstiness, expectedDays, historyDays, canNormalize },
     };
   }
 
@@ -842,8 +888,8 @@ const Analyzer = (() => {
       label: "高評価の投稿時期の集中",
       axis: AXES.timing,
       weight: WEIGHTS.burst,
-      description: "取得できた高評価(★4以上)クチコミのうち「最も密集する3件」が何日間に収まっているか。サクラ発注はバイトを一定期間で募集するため、短期集中で反映される傾向があります。低評価の集中は逆方向のパターンのため、E軸で別に評価します。",
-      altExplanation: "テレビ・SNSでの話題化、開店直後、キャンペーン実施でも同じパターンが生じます。またGoogle公式APIは関連度順で最大5件しか返さないため、店舗の真の投稿状況を厳密に反映しているわけではありません。",
+      description: "取得できた高評価(★4以上)クチコミのうち「最も密集する3件」が、その店舗の投稿ペースから見てどれだけ詰まっているか。クチコミが多い店ほど短期間に複数付くのは当然なので、「総クチコミ数 ÷ 観測できる履歴の長さ」から平常ペースを見積もり、それとの比で採点します。サクラ発注はバイトを一定期間で募集するため、平常ペースを超える短期集中として現れる傾向があります。低評価の集中は逆方向のパターンのため、E軸で別に評価します。",
+      altExplanation: "テレビ・SNSでの話題化、開店直後、キャンペーン実施でも同じパターンが生じます。また平常ペースの見積もりには総クチコミ数を使うため、サクラ投稿が全体の大半を占める店では、そのサクラ自体が平常ペースを押し上げて集中が見えにくくなります。",
     },
     author_pattern: {
       label: "投稿者名の傾向",
@@ -1025,7 +1071,7 @@ const Analyzer = (() => {
       scoreTextPattern(reviews),
       scoreStyleUniformity(reviews),
       scoreRatingTextGap(reviews),
-      scoreBurst(reviews, place.userRatingCount, recent),
+      scoreBurst(reviews, place.userRatingCount, recent, at),
       scoreAuthorPattern(reviews),
       scoreRatingAnomaly(place.rating, place.userRatingCount),
       scorePeerDeviation(place.rating, peers),
