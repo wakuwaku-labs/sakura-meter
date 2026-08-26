@@ -165,6 +165,21 @@ const Analyzer = (() => {
    * A. 文体・表現の軸
    * ===================================================================== */
 
+  /* 日本語で書かれたクチコミかどうか。
+   *
+   * 本ツールの文章解析(定型フレーズ・具体性マーカー・体験動詞・酷評語)は
+   * すべて日本語の語彙に依存している。英語などのクチコミにそのまま当てる
+   * と、どのパターンにもマッチしないため「具体性ゼロ・体験記述ゼロ」と
+   * 判定され、実際には非常に具体的な内容でも定型文扱いになってしまう。
+   * 観光地や都心の飲食店では外国語のクチコミが関連度上位を占めることが
+   * 珍しくないため、実害が大きい。日本語以外は解析対象から外す。 */
+  function isJapanese(text) {
+    const t = (text || "").trim();
+    if (!t) return false;
+    const jp = (t.match(/[ぁ-んァ-ヴ一-龠々ー]/g) || []).length;
+    return jp >= 3 && jp / t.length >= 0.15;
+  }
+
   /* 1件のクチコミの「定型度」を 0〜1 で返す */
   function reviewGenericness(text) {
     const t = (text || "").trim();
@@ -232,11 +247,16 @@ const Analyzer = (() => {
 
   /* ---- S1: クチコミ本文の定型度 -------------------------------------- */
   function scoreTextPattern(reviews) {
-    const positive = (reviews || []).filter((r) => (r.rating || 0) >= 4);
+    const allPositive = (reviews || []).filter((r) => (r.rating || 0) >= 4);
+    const positive = allPositive.filter((r) => isJapanese(r.text));
+    const foreign = allPositive.length - positive.length;
     if (positive.length < 2) {
       return insufficient(
         "text_pattern",
-        `本文を分析できる高評価クチコミが${positive.length}件しかありません(2件以上必要)。`
+        `本文を分析できる日本語の高評価クチコミが${positive.length}件しかありません(2件以上必要)。`
+          + (foreign > 0
+              ? `${foreign}件は日本語以外のため対象外としています(本ツールの文章解析は日本語の語彙に依存しており、外国語のクチコミに当てると、具体的な内容でも定型文と誤判定してしまうためです)。`
+              : "")
       );
     }
     const stats = positive.map((r) => reviewGenericness(r.text));
@@ -257,7 +277,7 @@ const Analyzer = (() => {
     const superlativeOnly = stats.filter((x) => x.superlative > 0 && x.specifics === 0).length;
     const reservedCount = stats.filter((x) => x.reserved).length;
 
-    let ev = `高評価クチコミ${positive.length}件のうち、定型的と判定した文が${genericCount}件、価格・料理名・注文内容など具体的な記述を含まない文が${noSpecific}件です。`;
+    let ev = `日本語の高評価クチコミ${positive.length}件のうち、定型的と判定した文が${genericCount}件、価格・料理名・注文内容など具体的な記述を含まない文が${noSpecific}件です。`;
     if (superlativeOnly > 0) {
       ev += ` うち${superlativeOnly}件は「最高」「間違いない」等の絶賛表現を含みながら具体的な記述がありません。`;
     }
@@ -266,6 +286,9 @@ const Analyzer = (() => {
     }
     if (dupBonus > 0) {
       ev += ` また、文面が強く類似するクチコミの組があります(類似度 ${(maxSim * 100).toFixed(0)}%)。`;
+    }
+    if (foreign > 0) {
+      ev += ` なお、日本語以外のクチコミ${foreign}件は解析対象から除外しています。`;
     }
     return {
       id: "text_pattern",
@@ -293,13 +316,13 @@ const Analyzer = (() => {
     /* 機械翻訳された文は除外する。Googleが外国語のクチコミを翻訳して返す
      * 場合、別人が書いた複数のクチコミが同じ翻訳エンジンの文体になり、
      * 「揃っている」と誤判定してしまう。 */
-    const usable = all.filter((r) => !r.translated);
+    const usable = all.filter((r) => !r.translated && isJapanese(r.text));
     const excluded = all.length - usable.length;
     if (usable.length < 3) {
       return insufficient(
         "style_uniformity",
         `文体を比較できる高評価クチコミが${usable.length}件しかありません(3件以上必要)。`
-          + (excluded > 0 ? `機械翻訳された${excluded}件は、翻訳エンジンの文体に揃ってしまうため除外しています。` : "")
+          + (excluded > 0 ? `機械翻訳された文と日本語以外の文、あわせて${excluded}件を除外しています(文末表現の型が日本語を前提としているため)。` : "")
       );
     }
     const authors = new Set(usable.map((r) => r.author || ""));
@@ -534,7 +557,10 @@ const Analyzer = (() => {
     if (!n) return false;
     if (/^[一-龠々]{2,3}[ 　][一-龠々]{1,3}$/.test(n)) return true;   // 山田 太郎
     if (/^[一-龠々]{3,5}$/.test(n)) return true;                       // 山田太郎
-    if (/^[A-Za-z]+ [A-Za-z]+$/.test(n)) return true;                  // Taro Yamada
+    /* 「Anna Lam」のような英字の姓名は判定に使わない。英語圏では表示名を
+     * 本名にするのがごく普通で、日本の業者アカウントの特徴という前提が
+     * 成り立たない。実データで、外国人客の多い店の投稿者が軒並みこの型に
+     * 該当し、誤検知の原因になっていた。 */
     return false;
   }
 
@@ -669,7 +695,10 @@ const Analyzer = (() => {
 
   /* ---- S9: 低評価クチコミの酷評度 ------------------------------------ */
   function scoreNegativeAttack(reviews) {
-    const low = (reviews || []).filter((r) => (r.rating || 0) > 0 && (r.rating || 0) <= 2);
+    const allLow = (reviews || []).filter((r) => (r.rating || 0) > 0 && (r.rating || 0) <= 2);
+    /* 酷評語のリストも日本語依存のため、日本語のクチコミだけを対象にする。
+     * ただし本文が空の低評価は「本文なしの★1」として意味があるので残す。 */
+    const low = allLow.filter((r) => isJapanese(r.text) || !(r.text || "").trim());
     if (low.length < 2) {
       return insufficient(
         "negative_attack",
@@ -1020,6 +1049,38 @@ const Analyzer = (() => {
         score *= f;
       }
       score = clamp(Math.round(score), 0, 100);
+    }
+
+    /* --- 文体軸が欠けている場合はスコアを出さない ---
+     * 本ツールの判断の中核は本文の分析(A軸)で、重みの約半分を占める。
+     * これが1つも採点できない状態で残りのシグナルだけを合成すると、
+     * 「評価が高く、関連度上位のクチコミが近接している」という、人気店なら
+     * どこでも当てはまる特徴だけでスコアが決まってしまう。実際、外国語の
+     * クチコミしか取得できなかった人気店で、健全な店に49点が付いた。
+     * 重みの再配分は「一部が欠けたとき」の仕組みであって、中核が丸ごと
+     * 無いときに使うものではない。数字を出さず、理由を示して分析不可とする。 */
+    const coreText = byId.text_pattern;
+    if (totalWeight > 0 && !coreText.included) {
+      const foreignHeavy = reviews.filter(
+        (r) => (r.text || "").trim() && !isJapanese(r.text)
+      ).length;
+      return {
+        score: null,
+        band: null,
+        confidence: { level: "low", label: "低", reasons: ["本文を分析できなかった"] },
+        relief: null,
+        convergence: null,
+        checklist: buildChecklist(byId, reviews, recent),
+        signals,
+        direction: assessDirection(signals, byId),
+        recentActivity: recent,
+        sampleBias: assessSampleBias(place, reviews),
+        sampleSize: reviews.length,
+        analyzable: false,
+        unanalyzableReason: foreignHeavy >= 2
+          ? `取得できたクチコミ${reviews.length}件のうち${foreignHeavy}件が日本語以外のため、本文の分析ができませんでした。本ツールの文章解析は日本語の語彙にもとづいており、外国語のクチコミに当てると、具体的な内容が書かれていても定型文と誤判定してしまいます。誤った結果を出すよりも、判定を控えます。`
+          : `本文を分析できる日本語の高評価クチコミが2件に満たないため、スコアを算出できません。判断の中核となる本文の分析ができない状態で、評価の高さや投稿時期だけから判定すると、人気店を誤って疑うことになります。`,
+      };
     }
 
     const band = totalWeight > 0 ? BANDS.find((b) => score <= b.max) : null;
