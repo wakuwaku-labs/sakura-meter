@@ -45,7 +45,7 @@ cd "/Users/katagirijakutou/飲食店　サクラチェッカー" && python3 -m h
 - 運営者のGoogle Maps APIキーは **Cloudflare Workerの環境変数(シークレット)としてのみ存在**し、
   ブラウザ・HTMLソース・GitHubリポジトリのどこにも含まれません。
 - 各リクエストの前にWorkerが**月間の利用回数をKV(Cloudflareのキーバリューストア)でチェック**し、
-  上限(検索・分析それぞれ月900件、Google無料枠1,000件に対し余裕を持たせた値)に達したら
+  上限(検索・分析・新着順取得それぞれ月900件。各SKUの無料枠に対し余裕を持たせた値)に達したら
   Google APIへは中継せず、その場でエラーを返します。**割り当て超過のリクエストは課金対象になりません**
   (Googleへの通信自体が発生しないため)。
 - Cloudflare Workers・KVともに無料枠内で運用しており、クレジットカード登録も不要です
@@ -74,7 +74,7 @@ APIキーはお使いのブラウザ(localStorage)にのみ保存され、外部
 
 ### 無料枠についての補足(自分のキーを使う場合)
 
-- 2025年3月の料金体系変更により、Google Maps Platform の無料枠はSKU単位の月間無料呼び出し件数制です(Enterprise系SKUは月1,000件)。
+- 2025年3月の料金体系変更により、Google Maps Platform の無料枠はSKU単位の月間無料呼び出し件数制です(Enterprise系SKUは月1,000件)。新着順の取得に使う Places API (Legacy) は別SKU扱いで、既存の枠を消費しません。
   詳細: <https://mapsplatform.google.com/pricing/>
 - 想定外の課金を避けるため、Cloud Console の「割り当て」画面で1日あたりの上限を低めに設定し、
   ¥0の予算アラートを併用することをおすすめします。
@@ -120,7 +120,18 @@ cd cf-worker
 npx wrangler secret put GOOGLE_MAPS_API_KEY
 ```
 
-月間の利用上限(既定: 検索・分析それぞれ月900件)は `cf-worker/src/index.js` の `MONTHLY_CAPS` で調整できます。
+月間の利用上限(既定: 検索・分析・新着順取得それぞれ月900件)は `cf-worker/src/index.js` の `MONTHLY_CAPS` で調整できます。
+
+呼び出しごとに消費されるSKUと月間無料枠(2026年8月時点):
+
+| カウンタ | API | SKU | 無料枠 |
+|---|---|---|---|
+| `search` | Places API (New) Text Search | Enterprise | 月1,000件 |
+| `details` | Places API (New) Place Details | Enterprise | 月1,000件 |
+| `detailsLegacy` | Places API (Legacy) Place Details | Places Details (FC5C-DF28-543F) | 月5,000件 |
+| 〃 | 〃 | Atmosphere Data (D63D-5CC5-302A) | 月1,000件 ← 実質の上限 |
+
+Legacy の1回の呼び出しは2つのSKUを消費します。`fields=reviews` は Atmosphere Data に該当するため、効いてくるのは少ない方の月1,000件です。**各SKUの無料枠は独立している**ため、新着順の追加取得によって既存の検索・分析の枠が減ることはありません。
 
 ## 4. ファイル構成
 
