@@ -1036,3 +1036,116 @@ a { color: var(--accent); }
 @media (max-width: 520px) {
   .checklist-groups { grid-template-columns: 1fr; }
 }
+
+/* =========================================================================
+ * パターンの向き / 低評価側の独立メーター
+ * ========================================================================= */
+
+.direction-note {
+  margin: 10px 0 0;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--ink-3);
+  background: var(--surface-2);
+  font-size: 0.78rem;
+  line-height: 1.75;
+  color: var(--ink-2);
+}
+
+.direction-note strong { display: block; margin-bottom: 3px; color: var(--ink); }
+
+.direction-note.negative {
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+.direction-note.negative strong { color: var(--accent-strong); }
+
+.direction-note.both {
+  border-left-color: var(--band-caution);
+  background: var(--band-caution-soft);
+}
+.direction-note.both strong { color: var(--band-caution); }
+
+.direction-note.positive {
+  border-left-color: var(--sakura);
+  background: var(--sakura-soft);
+}
+.direction-note.positive strong { color: var(--sakura); }
+
+/* --- 低評価側メーター --- */
+.negative-section {
+  margin-top: 22px;
+  padding: 13px 15px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--band-mild);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.negative-section.caution { border-left-color: var(--band-caution); }
+.negative-section.strong { border-left-color: var(--band-strong); }
+
+.negative-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.negative-head h3 {
+  font-family: var(--font-display);
+  font-size: 0.96rem;
+  margin: 0;
+}
+
+.negative-score {
+  font-size: 1.5rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--band-mild);
+  line-height: 1;
+}
+
+.negative-score small { font-size: 0.7rem; font-weight: 400; color: var(--ink-3); }
+
+.negative-section.caution .negative-score { color: var(--band-caution); }
+.negative-section.strong .negative-score { color: var(--band-strong); }
+
+.negative-bar-track {
+  display: block;
+  height: 7px;
+  margin: 9px 0 11px;
+  border-radius: 999px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.negative-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--band-mild);
+  transition: width 0.5s ease;
+}
+
+.negative-section.caution .negative-bar-fill { background: var(--band-caution); }
+.negative-section.strong .negative-bar-fill { background: var(--band-strong); }
+
+.negative-body,
+.negative-alt {
+  margin: 0;
+  font-size: 0.79rem;
+  line-height: 1.8;
+  color: var(--ink-2);
+}
+
+.negative-alt {
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--border);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .negative-bar-fill { transition: none; }
+}

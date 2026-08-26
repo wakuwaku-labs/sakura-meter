@@ -180,6 +180,30 @@ const DEMO_PLACES = [
         text: "素敵な時間を過ごせました!!また絶対来ます!!" },
     ],
   },
+  {
+    id: "demo-008",
+    name: "町中華 龍鳳",
+    genre: "中華料理",
+    area: "東京・架空町",
+    address: "東京都架空区龍鳳町6-7-8(架空の住所)",
+    rating: 3.6,
+    userRatingCount: 128,
+    priceLevel: 1,
+    ratingDistribution: { 5: 58, 4: 27, 3: 8, 2: 5, 1: 30 },
+    demoNote: "具体性のない酷評★1が短期間に集中する例(第三者による低評価工作が疑われる・お店が被害者の側)",
+    reviews: [
+      { rating: 1, author: "架空 剛", publishTime: "2025-07-10T20:15:00+09:00",
+        text: "最悪。二度と行きません。" },
+      { rating: 1, author: "陽光 誠", publishTime: "2025-07-12T19:40:00+09:00",
+        text: "接客の態度が最悪でした。ありえない。行く価値なし。" },
+      { rating: 1, author: "架空 学", publishTime: "2025-07-13T21:05:00+09:00",
+        text: "汚いし不衛生。潰れた方がいいと思います。" },
+      { rating: 5, author: "町中華探訪", publishTime: "2025-02-08T12:30:00+09:00",
+        text: "五目焼きそば(880円)は具沢山で麺はパリパリ。土曜の12時半で待ちなしでした。店主のお母さんが気さくで、餃子(6個400円)は皮から手作りだそうです。" },
+      { rating: 4, author: "chuka_daisuki", publishTime: "2024-09-14T13:10:00+09:00",
+        text: "半チャーハンとラーメンのセット(750円)を注文。スープは昔ながらのあっさり醤油です。ただ店内は油の匂いが強いので、服に匂いがつくのが気になる人は注意。" },
+    ],
+  },
 ];
 
 if (typeof module !== "undefined" && module.exports) module.exports = DEMO_PLACES;

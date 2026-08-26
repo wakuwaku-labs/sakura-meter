@@ -32,6 +32,7 @@ const Analyzer = (() => {
     account: "C. 投稿者アカウント",
     distribution: "D. 評価分布",
     level: "E. 評価水準",
+    negative: "F. 低評価クチコミの質",
   };
 
   /* ---- 定数: シグナル重み (合計 1.0) ----
@@ -42,14 +43,15 @@ const Analyzer = (() => {
    * 評価履歴といった決定的な情報が取得できない。そのため実務上の重要度
    * ほどの重みは置けず、低めの 8% に留めている(限界として開示)。 */
   const WEIGHTS = {
-    textPattern: 0.30,        // A
-    styleUniformity: 0.08,    // A
-    ratingTextGap: 0.10,      // A
-    burst: 0.15,              // B
-    authorPattern: 0.08,      // C
-    ratingDistribution: 0.12, // D
-    ratingAnomaly: 0.09,      // E
-    peerDeviation: 0.08,      // E
+    textPattern: 0.27,        // A
+    styleUniformity: 0.07,    // A
+    ratingTextGap: 0.09,      // A
+    burst: 0.14,              // B
+    authorPattern: 0.07,      // C
+    ratingDistribution: 0.11, // D
+    ratingAnomaly: 0.08,      // E
+    peerDeviation: 0.07,      // E
+    negativeAttack: 0.10,     // F
   };
 
   /* Bayesian 縮約の事前分布: 日本の飲食店の Google 評価は概ね 3.2〜3.9 に
@@ -79,6 +81,28 @@ const Analyzer = (() => {
     "生涯", "涙が出",
   ];
 
+  /* 酷評・攻撃表現。低評価クチコミが「具体的な不満の説明」ではなく
+   * 「罵倒だけ」になっていないかを見るための語彙。
+   * 注意: 本物の怒った利用者もこれらの語を使う。単独では証拠にならず、
+   *      「酷評 × 具体性の欠如」の組み合わせで初めて意味を持つ。 */
+  const ATTACK_PHRASES = [
+    "最悪", "最低", "二度と", "ありえない", "あり得ない", "ふざけ",
+    "詐欺", "ぼったくり", "ぼられ", "金返せ", "金返し", "返金しろ",
+    "潰れ", "つぶれろ", "行く価値", "行かない方", "来ない方",
+    "おすすめしません", "お勧めしません", "勧めません",
+    "不衛生", "汚い", "きたない", "不潔", "虫が",
+    "態度が悪", "無愛想", "無礼", "失礼", "偉そう", "上から目線",
+    "腹が立", "ムカつ", "不快", "気分が悪",
+    "騙され", "だまされ", "嘘", "地雷", "残飯", "食えたもの",
+    "まずい", "不味い", "訴え",
+  ];
+
+  /* 上のうち、本物の利用者はまず書かない強い全否定・人格攻撃 */
+  const SEVERE_ATTACK_PHRASES = [
+    "潰れ", "つぶれろ", "詐欺", "騙され", "だまされ", "金返せ",
+    "残飯", "地雷", "ふざけ", "訴え",
+  ];
+
   /* 留保・率直な指摘: サクラ投稿には現れにくい(本物らしさの証拠) */
   const RESERVATION_PATTERNS = [
     /残念|惜しい|欠点|マイナス|difficult/,
@@ -103,10 +127,10 @@ const Analyzer = (() => {
 
   /* 実体験を示す動詞・語尾 */
   const EXPERIENCE_PATTERNS = [
-    /しました|でした|いたしました/,
+    /ました|ません|でした|いたしました/,
     /頂[きい]|いただ[きい]|食べ|飲[んみ]|味わ/,
     /行っ|訪れ|伺[いっ]|来店|入店|寄っ/,
-    /待っ|座っ|案内され|通され/,
+    /待[った]|並[んび]|座っ|案内|通され/,
   ];
 
   /* 「長いカタカナ語＝料理名」判定の誤爆を防ぐ除外語。
@@ -383,44 +407,43 @@ const Analyzer = (() => {
     return { days: best, items: items.slice(bestIdx, bestIdx + k) };
   }
 
-  /* ---- S4: 投稿時期の集中(バースト) ----------------------------------
+  /* ---- S4: 高評価の投稿時期の集中(バースト) --------------------------
    * 注意: Google Places API (New) が返すクチコミは投稿日時の新しい順では
    * なく「関連度順(most relevant)」で最大5件。取得後に日付でソートして
    * いるが、これは店舗の全期間から関連度で選ばれた最大5件の投稿日時の
    * ばらつきを見ているに過ぎない(計測方法モーダルで開示)。
    *
-   * 旧実装は「最古〜最新の全体幅」だけを見ていたため、
-   *   「3年に散らばる5件のうち3件だけが同じ週に固まっている」
-   * という、業者発注に最も典型的なパターンを取りこぼしていた。
-   * ここでは全体幅ではなく「3件が収まる最短の窓」を主指標にする。 */
+   * このシグナルは「高評価(★4以上)の集中」だけを見る。低評価が短期に
+   * 固まるのは逆方向のパターン(第三者による低評価工作の疑い)であり、
+   * F軸「低評価クチコミの質」で別途評価する。両者を1つの指標に混ぜると、
+   * 攻撃を受けている店が高評価の水増しをしているように見えてしまう。
+   *
+   * また、全体幅ではなく「3件が収まる最短の窓」を主指標にしている。
+   * 全体幅だけを見ると「3年に散らばる5件のうち3件だけが同じ週に固まって
+   * いる」という、業者発注に最も典型的なパターンを取りこぼすため。 */
   function scoreBurst(reviews, count) {
     const dated = (reviews || [])
       .map((r) => ({
         date: r.publishTime ? new Date(r.publishTime) : null,
         rating: r.rating || 0,
       }))
-      .filter((x) => x.date && !isNaN(x.date.getTime()))
+      .filter((x) => x.date && !isNaN(x.date.getTime()) && x.rating >= 4)
       .sort((a, b) => b.date - a.date); // 新しい順
 
     if (dated.length < 3) {
       return insufficient(
         "burst",
-        `投稿日時つきのクチコミが${dated.length}件しかなく、時期の分析には3件以上必要です。`
+        `投稿日時つきの高評価(★4以上)クチコミが${dated.length}件しかなく、時期の分析には3件以上必要です。`
       );
     }
 
     const win = minWindow(dated, 3);
     const days = win.days;
-    const allHigh = win.items.every((x) => x.rating >= 4);
     const totalSpanDays = Math.round((dated[0].date - dated[dated.length - 1].date) / DAY_MS);
 
     let score = piecewise(days, [
       [3, 92], [7, 82], [14, 70], [30, 55], [90, 35], [180, 20], [365, 10], [730, 5],
     ]);
-
-    /* 集中しているのが高評価だけなら、発注パターンにより近い */
-    if (allHigh) score += 8;
-    else score -= 12;
 
     /* 総クチコミ数が多い店ほど「関連度上位が数日に固まる」ことは起きにくい */
     if ((count || 0) >= 100 && days <= 14) score += 6;
@@ -433,10 +456,7 @@ const Analyzer = (() => {
 
     const from = win.items[win.items.length - 1].date;
     const to = win.items[0].date;
-    let ev = `取得できたクチコミ${dated.length}件のうち、最も密集する3件は ${fmtDate(from)} 〜 ${fmtDate(to)} の${Math.round(days)}日間に投稿されています(全体の投稿期間は${totalSpanDays}日)。`;
-    ev += allHigh
-      ? " この3件はいずれも★4以上で、高評価だけが短期に集中しています。"
-      : " ただしこの3件には低・中評価が混ざっており、発注パターンとは異なる可能性が高いため減点しています。";
+    let ev = `取得できた高評価クチコミ${dated.length}件のうち、最も密集する3件は ${fmtDate(from)} 〜 ${fmtDate(to)} の${Math.round(days)}日間に投稿されています(高評価全体の投稿期間は${totalSpanDays}日)。`;
     if (isolatedCluster) {
       ev += " 全体としては長期間に分布する中で、一部だけが固まっている形です。";
     }
@@ -447,7 +467,7 @@ const Analyzer = (() => {
       score,
       included: true,
       evidence: ev,
-      detail: { days, allHigh, totalSpanDays, isolatedCluster, n: dated.length },
+      detail: { days, totalSpanDays, isolatedCluster, n: dated.length },
     };
   }
 
@@ -636,6 +656,113 @@ const Analyzer = (() => {
     };
   }
 
+  /* =====================================================================
+   * F. 低評価クチコミの質の軸
+   *
+   * 「★1の中でも、文言がかなり酷評になっているものが多数ある」場合を
+   * 捉える。これは高評価の水増しとは逆方向の操作(競合など第三者による
+   * 低評価工作、いわゆる逆サクラ)の兆候であり、この場合お店は被害を
+   * 受けている側になる。方向の読み違いを防ぐため、analyze() は結果に
+   * 「パターンの向き」を添えて返す。
+   *
+   * 判別の要は「酷評であること」ではなく「酷評 × 具体性の欠如」。
+   * 本物の不満客は、何を注文し、何が起きて、どう不快だったかを具体的に
+   * 書く傾向がある。実際に来店していない投稿は罵倒だけになりやすい。
+   * ===================================================================== */
+
+  /* 1件の低評価クチコミの「実体験を伴わない酷評らしさ」を 0〜1 で返す */
+  function reviewHostility(text) {
+    const t = (text || "").trim();
+    const len = t.length;
+    if (!len) return { h: 0, mild: 0, severe: 0, specifics: 0, len: 0 };
+
+    const mild = ATTACK_PHRASES.filter((p) => t.includes(p)).length;
+    const severe = SEVERE_ATTACK_PHRASES.filter((p) => t.includes(p)).length;
+
+    let sev = Math.min(mild, 4) * 0.15 + Math.min(severe, 2) * 0.20;
+    if (len < 25 && mild >= 1) sev += 0.20;  // 短い罵倒だけ
+    if (len < 12 && mild >= 1) sev += 0.10;
+    sev = clamp(sev, 0, 1);
+    if (sev === 0) return { h: 0, mild, severe, specifics: countSpecifics(t), len };
+
+    /* 具体性が高いほど「正当な苦情」とみなして減点する */
+    const specifics = countSpecifics(t);
+    let credit = specifics >= 3 ? 0.75 : specifics >= 2 ? 0.5 : specifics >= 1 ? 0.25 : 0;
+    const experience = EXPERIENCE_PATTERNS.filter((re) => re.test(t)).length;
+    if (experience === 0) credit *= 0.5;  // 来店した形跡すらない
+
+    return { h: clamp(sev * (1 - credit), 0, 1), mild, severe, specifics, len };
+  }
+
+  /* ---- S9: 低評価クチコミの酷評度 ------------------------------------ */
+  function scoreNegativeAttack(reviews, dist) {
+    const low = (reviews || []).filter((r) => (r.rating || 0) > 0 && (r.rating || 0) <= 2);
+    if (low.length < 2) {
+      return insufficient(
+        "negative_attack",
+        `★1〜2のクチコミが${low.length}件しかありません(2件以上必要)。Google公式APIは関連度順で最大5件しか返さないため、実際には低評価が多くても取得できない場合があります。`
+      );
+    }
+    const stats = low.map((r) => reviewHostility(r.text));
+    const meanH = stats.reduce((a, x) => a + x.h, 0) / stats.length;
+    const harsh = stats.filter((x) => x.h >= 0.4).length;
+    const noSpecific = stats.filter((x) => x.h >= 0.4 && x.specifics === 0).length;
+
+    let score = meanH * 75;
+    const parts = [];
+
+    /* 低評価どうしの文面の使い回し */
+    const texts = low.map((r) => (r.text || "").trim()).filter((t) => t.length >= 10);
+    let maxSim = 0;
+    for (let i = 0; i < texts.length; i++) {
+      for (let j = i + 1; j < texts.length; j++) {
+        maxSim = Math.max(maxSim, bigramSimilarity(texts[i], texts[j]));
+      }
+    }
+    if (maxSim > 0.35) {
+      score += clamp(((maxSim - 0.35) / 0.35) * 25, 0, 25);
+      parts.push(`文面が強く似た低評価の組があります(類似度 ${(maxSim * 100).toFixed(0)}%)`);
+    }
+
+    /* 低評価の短期集中 */
+    const dated = low
+      .map((r) => ({ date: r.publishTime ? new Date(r.publishTime) : null, rating: r.rating }))
+      .filter((x) => x.date && !isNaN(x.date.getTime()))
+      .sort((a, b) => b.date - a.date);
+    let clusterDays = null;
+    if (dated.length >= 2) {
+      clusterDays = Math.round((dated[0].date - dated[dated.length - 1].date) / DAY_MS);
+      if (clusterDays <= 14) {
+        score += 15;
+        parts.push(`${dated.length}件の低評価が${clusterDays}日以内に集中しています`);
+      }
+    }
+
+    /* 分布が入力済みなら、★1が実際に多いことを裏づけとして加点 */
+    const d = normalizeDistribution(dist);
+    if (d && d.p1 >= 0.10) {
+      score += 10;
+      parts.push(`全体の★1比率も ${(d.p1 * 100).toFixed(1)}% と高めです`);
+    }
+
+    score = clamp(Math.round(score), 0, 100);
+
+    let ev = `★1〜2のクチコミ${low.length}件のうち、罵倒・全否定が中心と判定した文が${harsh}件`;
+    ev += noSpecific > 0
+      ? `(うち${noSpecific}件は、注文内容・待ち時間・具体的な出来事などの記述が一切ありません)。`
+      : `です。`;
+    ev += " 本物の不満客は「何を注文し、何が起きて、どう不快だったか」を具体的に書く傾向があるため、具体性を伴う低評価は減点しています。";
+    if (parts.length) ev += " " + parts.join("。") + "。";
+
+    return {
+      id: "negative_attack",
+      score,
+      included: true,
+      evidence: ev,
+      detail: { meanH, harsh, noSpecific, n: low.length, maxSim, clusterDays },
+    };
+  }
+
   /* ---- シグナル定義(表示用メタデータ) -------------------------------- */
   const SIGNAL_META = {
     text_pattern: {
@@ -660,10 +787,10 @@ const Analyzer = (() => {
       altExplanation: "常連客が気軽に星だけ付ける文化の店でも高くなります。スマートフォンから星だけ付ける操作は非常に手軽です。",
     },
     burst: {
-      label: "投稿時期の集中",
+      label: "高評価の投稿時期の集中",
       axis: AXES.timing,
       weight: WEIGHTS.burst,
-      description: "取得できたクチコミのうち「最も密集する3件」が何日間に収まっているか。サクラ発注はバイトを一定期間で募集するため、短期集中で反映される傾向があります。集中しているのが高評価だけかどうかも見ています。",
+      description: "取得できた高評価(★4以上)クチコミのうち「最も密集する3件」が何日間に収まっているか。サクラ発注はバイトを一定期間で募集するため、短期集中で反映される傾向があります。低評価の集中は逆方向のパターンのため、F軸で別に評価します。",
       altExplanation: "テレビ・SNSでの話題化、開店直後、キャンペーン実施でも同じパターンが生じます。またGoogle公式APIは関連度順で最大5件しか返さないため、店舗の真の投稿状況を厳密に反映しているわけではありません。",
     },
     author_pattern: {
@@ -687,6 +814,13 @@ const Analyzer = (() => {
       description: "件数を考慮して補正した平均評価が、国内飲食店の一般的な水準からどれだけ上振れしているか。",
       altExplanation: "本当に優れた人気店でも高くなります。この指標だけで判断はできません。",
     },
+    negative_attack: {
+      label: "低評価の酷評度",
+      axis: AXES.negative,
+      weight: WEIGHTS.negativeAttack,
+      description: "★1〜2のクチコミが、具体的な不満の説明ではなく罵倒・全否定だけになっていないか。低評価どうしの文面の類似や、短期間への集中も見ます。実際に来店していない投稿は、何を注文したか・何が起きたかを書けないため罵倒だけになりやすいという性質を使っています。",
+      altExplanation: "本当にひどい体験をした利用者も、強い言葉で短く書くことがあります。特に衛生面や接客のトラブルは、詳細を書かずに一言で済ませる人が少なくありません。また、このシグナルが高い場合、疑われるのは店舗ではなく第三者(競合など)による低評価工作である可能性があります。",
+    },
     peer_deviation: {
       label: "周辺相場との乖離",
       axis: AXES.level,
@@ -700,7 +834,13 @@ const Analyzer = (() => {
   const SIGNAL_ORDER = [
     "text_pattern", "style_uniformity", "rating_text_gap",
     "burst", "author_pattern", "rating_distribution",
-    "rating_anomaly", "peer_deviation",
+    "rating_anomaly", "peer_deviation", "negative_attack",
+  ];
+
+  /* 高評価側(店舗による水増しを疑うシグナル)。方向の判定に使う */
+  const POSITIVE_SIDE_IDS = [
+    "text_pattern", "style_uniformity", "rating_text_gap",
+    "burst", "author_pattern", "rating_anomaly", "peer_deviation",
   ];
 
   const BANDS = [
@@ -739,12 +879,12 @@ const Analyzer = (() => {
 
     /* B. タイミング */
     const b = s("burst"), bd = d("burst");
-    list.push(item(AXES.timing, "投稿が短期間(30日以内)に集中している",
+    list.push(item(AXES.timing, "高評価の投稿が短期間(30日以内)に集中している",
       b.included ? (bd.days <= 30 ? "hit" : "clear") : "unknown",
-      b.included ? `最密の3件が${Math.round(bd.days)}日間に集中` : "日付付きが3件未満で判定不可"));
-    list.push(item(AXES.timing, "集中しているのが高評価だけである",
-      b.included ? (bd.days <= 60 && bd.allHigh ? "hit" : "clear") : "unknown",
-      b.included ? (bd.allHigh ? "密集した3件はすべて★4以上" : "密集部分に低・中評価が混在") : "判定不可"));
+      b.included ? `最密の3件が${Math.round(bd.days)}日間に集中` : "日付付きの高評価が3件未満で判定不可"));
+    list.push(item(AXES.timing, "その集中が全体の投稿期間から浮いている",
+      b.included ? (bd.isolatedCluster ? "hit" : "clear") : "unknown",
+      b.included ? (bd.isolatedCluster ? `全体${bd.totalSpanDays}日の分布の中で${Math.round(bd.days)}日に集中` : "全体の分布と大きな差はない") : "判定不可"));
 
     /* C. アカウント */
     const ap = s("author_pattern"), apd = d("author_pattern");
@@ -773,6 +913,20 @@ const Analyzer = (() => {
       pd.included ? (pdd.z >= 2 ? "hit" : "clear") : "unknown",
       pd.included ? `z = ${pdd.z.toFixed(1)}` : "周辺店舗が5件未満で判定不可"));
 
+    /* F. 低評価の質 */
+    const na = s("negative_attack"), nad = d("negative_attack");
+    list.push(item(AXES.negative, "具体性を欠く酷評の★1・★2が多い",
+      na.included ? (nad.noSpecific >= 2 || (nad.harsh / nad.n) >= 0.5 ? "hit" : "clear") : "unknown",
+      na.included
+        ? `罵倒中心 ${nad.harsh}/${nad.n}件(うち具体的記述なし ${nad.noSpecific}件)`
+        : "★1〜2が2件未満で判定不可"));
+    list.push(item(AXES.negative, "低評価が短期間(14日以内)に集中している",
+      na.included && nad.clusterDays != null ? (nad.clusterDays <= 14 ? "hit" : "clear") : "unknown",
+      na.included && nad.clusterDays != null ? `低評価${nad.n}件が${nad.clusterDays}日間に分布` : "判定不可"));
+    list.push(item(AXES.negative, "低評価どうしの文面が似ている",
+      na.included ? (nad.maxSim > 0.35 ? "hit" : "clear") : "unknown",
+      na.included ? `最大類似度 ${(nad.maxSim * 100).toFixed(0)}%` : "判定不可"));
+
     const hits = list.filter((x) => x.state === "hit").length;
     const judged = list.filter((x) => x.state !== "unknown").length;
     return { items: list, hits, judged, total: list.length };
@@ -790,6 +944,7 @@ const Analyzer = (() => {
       scoreRatingDistribution(place.ratingDistribution, place.userRatingCount, place.rating),
       scoreRatingAnomaly(place.rating, place.userRatingCount),
       scorePeerDeviation(place.rating, peers),
+      scoreNegativeAttack(reviews, place.ratingDistribution),
     ];
 
     const byId = {};
@@ -837,10 +992,17 @@ const Analyzer = (() => {
        * 「率直な留保を含む中間評価(★2〜4)」の存在は、自然なクチコミ分布の
        * 兆候。★1は『お椀型(二極化)』というサクラ側のパターンの一部でも
        * あるため、旧実装のように緩和材料として数えない。 */
-      const midCandid = reviews.filter(
-        (r) => (r.rating || 0) >= 2 && (r.rating || 0) <= 4 &&
-               (r.text || "").trim().length >= 20
-      ).length;
+      /* ★2は「率直な中間評価」のこともあれば「攻撃的な低評価」のことも
+       * ある。後者を緩和材料に数えると、低評価工作を受けている店ほど
+       * スコアが下がるという逆転が起きるため、酷評型は除外する。 */
+      const midCandid = reviews.filter((r) => {
+        const rt = r.rating || 0;
+        if (rt < 2 || rt > 4) return false;
+        const txt = (r.text || "").trim();
+        if (txt.length < 20) return false;
+        if (rt <= 2 && reviewHostility(txt).h >= 0.4) return false;
+        return true;
+      }).length;
       if (midCandid > 0 && score > 0) {
         let f = midCandid >= 2 ? 0.80 : 0.88;
         /* ただし、直近に高評価だけのバーストがある場合は緩和を半分に抑える。
@@ -864,6 +1026,7 @@ const Analyzer = (() => {
     const band = totalWeight > 0 ? BANDS.find((b) => score <= b.max) : null;
     const confidence = assessConfidence(place, peers, reviews, included.length);
     const checklist = buildChecklist(byId, reviews);
+    const direction = assessDirection(signals, byId);
 
     return {
       score: totalWeight > 0 ? score : null,
@@ -872,10 +1035,74 @@ const Analyzer = (() => {
       relief,
       convergence,
       checklist,
+      direction,
       signals,
       sampleSize: reviews.length,
       analyzable: totalWeight > 0,
       hasDistribution: !!normalizeDistribution(place.ratingDistribution),
+    };
+  }
+
+  /* ---- パターンの向き ------------------------------------------------
+   * 不自然さが「高評価の側」に出ているのか「低評価の側」に出ているのかを
+   * 判定する。両者は操作の方向が正反対で、後者の場合お店は被害を受けて
+   * いる側である可能性が高い。同じスコアでも意味がまるで違うため、
+   * 数値だけを見て読み違えられないよう必ず添えて表示する。 */
+  function assessDirection(signals, byId) {
+    const pos = signals.filter((x) => POSITIVE_SIDE_IDS.includes(x.id) && x.included);
+    const posW = pos.reduce((a, x) => a + x.weight, 0);
+    const posScore = posW > 0 ? pos.reduce((a, x) => a + x.score * (x.weight / posW), 0) : null;
+    const neg = byId.negative_attack;
+    const negScore = neg && neg.included ? neg.score : null;
+
+    const base = {
+      posScore: posScore == null ? null : Math.round(posScore),
+      negScore,
+      /* 低評価側は本体スコアの一部(重み10%)にしかならず、そのままでは
+       * 「本体スコアは低いのに低評価工作は明白」という状態を見落とす。
+       * 一定以上なら独立した数値として前面に出す。 */
+      showNegativeMeter: negScore != null && negScore >= 40,
+    };
+
+    if (negScore == null) {
+      return {
+        ...base,
+        key: "unknown",
+        label: "低評価側は判定できていません",
+        note: "分析対象に★1〜2のクチコミが2件以上含まれていないため、低評価側の操作(第三者による低評価工作)については判定できていません。表示中のスコアは高評価側のパターンのみを反映しています。",
+      };
+    }
+    const p = posScore == null ? 0 : posScore;
+
+    if (negScore >= 55 && negScore >= p + 15) {
+      return {
+        ...base,
+        key: "negative",
+        label: "不自然さは低評価の側に出ています",
+        note: "第三者(競合など)による低評価工作の可能性があり、その場合このお店は被害を受けている側です。上の「サクラ的パターン一致度」は主に高評価の水増しを測る指標のため、この状況では低く出ます。数値ではなく、この向きの表示でご判断ください。事実無根の投稿は、プラットフォームへの削除申請の対象になり得ます。",
+      };
+    }
+    if (negScore >= 55 && p >= 45) {
+      return {
+        ...base,
+        key: "both",
+        label: "不自然さが高評価・低評価の両側に出ています",
+        note: "評価が二極化しており、クチコミ全体が実態を反映していない可能性があります。高評価の水増しと低評価の攻撃が同時に起きている場合のほか、サクラの★5で作られた期待に本物の利用者が幻滅して★1をつけた場合(お椀型)もこの形になります。",
+      };
+    }
+    if (p >= 45) {
+      return {
+        ...base,
+        key: "positive",
+        label: "不自然さは高評価の側に出ています",
+        note: "店舗側による高評価の水増しと重なるパターンです。低評価クチコミの側には、際立った不自然さは見られません。",
+      };
+    }
+    return {
+      ...base,
+      key: "none",
+      label: "高評価側・低評価側とも際立った偏りなし",
+      note: "どちらの方向にも、操作を疑わせる際立ったパターンは見られません。",
     };
   }
 
@@ -913,11 +1140,11 @@ const Analyzer = (() => {
   }
 
   return {
-    analyze, WEIGHTS, SIGNAL_META, SIGNAL_ORDER, BANDS, AXES,
+    analyze, WEIGHTS, SIGNAL_META, SIGNAL_ORDER, POSITIVE_SIDE_IDS, BANDS, AXES,
     FAKE_FIVE_STAR_RATE, NORMAL_FIVE_STAR_RATE,
     /* テスト用に内部関数も公開 */
     _internal: {
-      reviewGenericness, bigramSimilarity, piecewise, isFullNameStyle,
+      reviewGenericness, reviewHostility, bigramSimilarity, piecewise, isFullNameStyle,
       normalizeDistribution, minWindow, countSpecifics, endingForm,
     },
   };

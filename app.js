@@ -453,6 +453,7 @@
             <span class="conf-chip ${r.confidence.level}">${r.confidence.label}</span>
             <span>${esc(r.confidence.reasons.join(" / "))}</span>
           </div>
+          ${directionHtml(r)}
           <button class="method-link" type="button" data-modal="method">この数値の算出方法を見る</button>
           ${r.convergence && r.convergence.note ? `<p class="relief-note">${esc(r.convergence.note)}</p>` : ""}
           ${r.relief ? `<p class="relief-note">${esc(r.relief.note)}</p>` : ""}
@@ -467,6 +468,7 @@
         </div>
       </section>`;
 
+    const negativeHtml = negativeMeterHtml(r);
     const checklistHtml = checklistSectionHtml(r);
     const distHtml = distributionSectionHtml(place, r);
 
@@ -484,7 +486,7 @@
         </div>
       </section>`;
 
-    panel.innerHTML = headerHtml + gaugeHtml + checklistHtml + signalsHtml +
+    panel.innerHTML = headerHtml + gaugeHtml + negativeHtml + checklistHtml + signalsHtml +
                       distHtml + reviewsHtml + disclaimerHtml();
     bindModalButtons(panel);
     bindDistributionForm(place);
@@ -496,6 +498,39 @@
         if (c) c.style.strokeDashoffset = (circumference - dash).toFixed(1);
       });
     });
+  }
+
+  /* ---- パターンの向き ------------------------------------------------
+   * 本体スコアは「高評価の水増し」を主に測る指標なので、低評価工作を
+   * 受けている店では低く出る。数値だけを見て「問題なし」と読み違えられ
+   * ないよう、向きは必ず添えて表示する。 */
+  function directionHtml(r) {
+    const d = r.direction;
+    if (!d || d.key === "none" || d.key === "unknown") return "";
+    return `<p class="direction-note ${d.key}">
+      <strong>${esc(d.label)}</strong>${esc(d.note)}
+    </p>`;
+  }
+
+  /* ---- 低評価側の独立メーター ----------------------------------------
+   * 低評価の酷評度は本体スコアでは重み10%にしかならず、そのままでは
+   * 「本体は低いのに低評価工作は明白」という状態が埋もれる。 */
+  function negativeMeterHtml(r) {
+    const d = r.direction;
+    if (!d || !d.showNegativeMeter) return "";
+    const sig = r.signals.find((s) => s.id === "negative_attack");
+    if (!sig || !sig.included) return "";
+    const level = sig.score >= 70 ? "strong" : sig.score >= 55 ? "caution" : "mild";
+    return `
+      <section class="negative-section ${level}">
+        <div class="negative-head">
+          <h3>低評価クチコミの操作が疑われる度合い</h3>
+          <span class="negative-score">${sig.score}<small>/100</small></span>
+        </div>
+        <div class="negative-bar-track"><span class="negative-bar-fill" style="width:${sig.score}%"></span></div>
+        <p class="negative-body">${esc(sig.evidence)}</p>
+        <p class="negative-alt"><span class="tag">読み方</span>この数値が高い場合、疑われるのは<strong>お店ではなく、低評価を書いた側</strong>です。競合による中傷や事実無根の投稿は、Googleへの削除申請の対象になり得ます。ただし、本当にひどい体験をした利用者が強い言葉で短く書くこともあり、これだけで工作と断定はできません。</p>
+      </section>`;
   }
 
   /* ---- チェックリスト(4軸12項目) ---------------------------------- */
