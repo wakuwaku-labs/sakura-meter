@@ -19,13 +19,23 @@ const ALLOWED_ORIGINS = [
   "http://localhost:8642",
 ];
 
-/* 無料枠(各SKU月1,000件)に対し、余裕を持たせた月間上限 */
+/* 各SKUの無料枠に対し、余裕を持たせた月間上限。
+ *
+ * 呼び出しごとに消費されるSKUと、その月間無料枠(2026年8月時点):
+ *   search  … Places API (New) Text Search Enterprise           月1,000件
+ *   details … Places API (New) Place Details Enterprise         月1,000件
+ *             (rating / reviews を含むため Enterprise 相当)
+ *   detailsLegacy … Places API (Legacy) の1回の呼び出しで2つのSKUを消費
+ *             - Places Details       (FC5C-DF28-543F) 月5,000件
+ *             - Atmosphere Data      (D63D-5CC5-302A) 月1,000件  ← 実質の上限
+ *             fields=reviews は Atmosphere Data に該当するため、
+ *             効いてくるのは少ない方の1,000件。よって上限は900件とする。
+ *
+ * いずれもSKUごとに独立した無料枠なので、新着順の追加取得によって
+ * 既存の検索・分析の枠が減ることはない。 */
 const MONTHLY_CAPS = {
   search: 900,
   details: 900,
-  /* Places API (Legacy) の Place Details は Places API (New) とは別SKU。
-   * 無料枠も別枠のため、独立したカウンタで管理する。
-   * 新着順クチコミの取得にのみ使用する。 */
   detailsLegacy: 900,
 };
 
@@ -188,35 +198,70 @@ function toNewShapeReview(r) {
 }
 
 /* 関連度順と新着順をマージして重複を除く。
- * 同一クチコミの判定は「投稿者名 + 投稿日時」。どちらも取れない場合は
- * 本文の先頭40文字で代用する。 */
+ *
+ * 重複判定を誤ると被害が大きい。同じクチコミが2件残ると、本文が完全一致
+ * するため類似度が100%になり「コピペされたクチコミ」として誤検知され、
+ * 投稿日時も同一になるため「0日間に集中」というバーストまで誤検出する。
+ *
+ * 注意すべき形式差:
+ *   Places API (New) の publishTime は RFC3339 で最大9桁の小数秒を持ちうる
+ *     例) 2026-06-01T10:20:30.045123456Z
+ *   Legacy の time は Unix秒なので、変換すると必ず .000Z になる
+ *     例) 2026-06-01T10:20:30.000Z
+ * そのまま文字列比較すると同一クチコミが別物と判定されるため、
+ * 秒単位に丸めてから比較する。
+ *
+ * さらに保険として、投稿者名+本文でも突き合わせる(APIによって日時が
+ * 微妙にずれる場合に備える)。 */
 function mergeReviews(relevant, newest) {
-  const keyOf = (r) => {
-    const author = (r.authorAttribution && r.authorAttribution.displayName) || "";
-    const time = r.publishTime || "";
-    if (author || time) return `${author}|${time}`;
-    const body = (r.text && r.text.text) || "";
-    return `t|${body.slice(0, 40)}`;
+  /* 秒精度に丸めた時刻。小数秒の有無による取りこぼしを防ぐ */
+  const secondsOf = (iso) => {
+    const t = Date.parse(iso || "");
+    return isNaN(t) ? "" : String(Math.floor(t / 1000));
+  };
+  const authorOf = (r) =>
+    (r.authorAttribution && r.authorAttribution.displayName) || "";
+  const bodyOf = (r) =>
+    ((r.text && r.text.text) || (r.originalText && r.originalText.text) || "")
+      .replace(/\s+/g, "");
+
+  /* 主キー: 投稿者名 + 投稿日時(秒) */
+  const timeKey = (r) => {
+    const author = authorOf(r);
+    const time = secondsOf(r.publishTime);
+    if (!author && !time) return null;
+    return `k1|${author}|${time}`;
+  };
+  /* 副キー: 投稿者名 + 本文の先頭60文字 */
+  const textKey = (r) => {
+    const author = authorOf(r);
+    const body = bodyOf(r);
+    if (!author && !body) return null;
+    return `k2|${author}|${body.slice(0, 60)}`;
   };
 
   const out = [];
-  const seen = new Map();
+  const index = new Map();
+  const register = (item) => {
+    for (const k of [timeKey(item), textKey(item)]) {
+      if (k) index.set(k, item);
+    }
+  };
+
   for (const r of relevant || []) {
-    const k = keyOf(r);
     const item = { ...r, _source: "relevant" };
-    seen.set(k, item);
+    register(item);
     out.push(item);
   }
   for (const r of newest || []) {
-    const k = keyOf(r);
-    const hit = seen.get(k);
+    const hit = index.get(timeKey(r)) || index.get(textKey(r));
     if (hit) {
       /* 両方に出てきたクチコミ。新着順にも含まれる = 直近の投稿である */
       hit._source = "both";
       continue;
     }
     const item = { ...r, _source: "newest" };
-    seen.set(k, item);
+    register(item);
     out.push(item);
   }
   return out;

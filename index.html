@@ -244,6 +244,10 @@
       <h3>自分専用のAPIキーを使いたい場合(任意)</h3>
       <p>共有枠を消費したくない方や、地図プレビュー機能を使いたい方は、ご自身のGoogle Maps Platform APIキーを登録できます。APIキーはこの端末(ブラウザ)にのみ保存され、外部へ送信されません。登録すると、共有枠に関係なくご自身のAPI利用枠の範囲で利用できます。</p>
 
+      <div class="callout">
+        <p><strong>分析の精度は既定モードのほうが高くなります。</strong>既定モード(代理サーバー経由)では、クチコミを関連度順と新着順の2通りで取得してマージしています(最大10件)。一方、ブラウザから直接呼び出す自分のキーのモードでは、公式SDKに並び順を指定する手段がないため<strong>関連度順の最大5件のみ</strong>となり、直近の投稿状況を確認できません。地図プレビューが必要な場合以外は、既定モードのままお使いいただくことをおすすめします。</p>
+      </div>
+
       <div class="settings-field">
         <label for="api-key-input">Google Maps Platform APIキー(任意)</label>
         <input type="password" id="api-key-input" placeholder="AIza..." autocomplete="off">
