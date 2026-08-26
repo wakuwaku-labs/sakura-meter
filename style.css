@@ -1092,3 +1092,15 @@ a { color: var(--accent); }
 
 .review-badge.recent { background: var(--accent-soft); color: var(--accent-strong); }
 .review-badge.translated { background: var(--surface-2); color: var(--ink-3); }
+
+/* 分析不可の理由を示すとき — 長文になるので中央寄せ・大きな余白をやめる */
+.panel-placeholder.reason {
+  text-align: left;
+  padding: 20px 22px;
+  line-height: 1.9;
+  font-size: 0.86rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--band-mild);
+  border-radius: var(--radius-sm);
+}

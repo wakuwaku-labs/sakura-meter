@@ -434,10 +434,13 @@
     if (!r.analyzable) {
       panel.innerHTML = `
         ${headerHtml}
-        <div class="panel-placeholder">
-          この店舗は分析に必要なデータ(評価・クチコミ)が不足しているため、スコアを算出できません。<br>
-          クチコミが増えてから改めてお試しください。
+        <div class="panel-placeholder${r.unanalyzableReason ? ' reason' : ''}">
+          ${r.unanalyzableReason
+            ? esc(r.unanalyzableReason)
+            : "この店舗は分析に必要なデータ(評価・クチコミ)が不足しているため、スコアを算出できません。クチコミが増えてから改めてお試しください。"}
         </div>
+        ${sampleBiasHtml(r)}
+        ${checklistSectionHtml(r)}
         ${disclaimerHtml()}`;
       return;
     }

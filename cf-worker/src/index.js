@@ -148,7 +148,7 @@ async function handleSearch(url, env, origin) {
  * ------------------------------------------------------------------------- */
 async function fetchNewestReviews(placeId, env) {
   const quota = await tryConsumeQuota(env.QUOTA_KV, "detailsLegacy");
-  if (!quota.ok) return null;
+  if (!quota.ok) return { reviews: null, reason: "quota_exceeded" };
 
   const params = new URLSearchParams({
     place_id: placeId,
@@ -163,13 +163,23 @@ async function fetchNewestReviews(placeId, env) {
     const res = await fetch(
       `https://maps.googleapis.com/maps/api/place/details/json?${params}`
     );
-    if (!res.ok) return null;
+    if (!res.ok) return { reviews: null, reason: `http_${res.status}` };
     const data = await res.json();
-    /* REQUEST_DENIED は Legacy 未有効化。ここで落とさず静かに諦める */
-    if (data.status !== "OK" || !data.result || !data.result.reviews) return null;
-    return data.result.reviews.map(toNewShapeReview);
+    /* 失敗しても分析自体は続行するが、理由は返す。完全にサイレントだと
+     * 「Legacy を有効化したつもりが実は効いていない」状態に気づけない。
+     * 代表的な原因:
+     *   REQUEST_DENIED … Places API (Legacy) が未有効、またはAPIキーの
+     *                     「APIの制限」に Places API が含まれていない
+     *   OVER_QUERY_LIMIT … 上限超過 */
+    if (data.status !== "OK") {
+      return { reviews: null, reason: data.status || "unknown", detail: (data.error_message || "").slice(0, 200) };
+    }
+    if (!data.result || !data.result.reviews) {
+      return { reviews: null, reason: "no_reviews" };
+    }
+    return { reviews: data.result.reviews.map(toNewShapeReview), reason: null };
   } catch (err) {
-    return null;
+    return { reviews: null, reason: "fetch_failed" };
   }
 }
 
@@ -295,9 +305,12 @@ async function handleDetails(placeId, env, origin) {
 
   /* 新着順クチコミを追加取得してマージする。取得できなければ従来どおり
    * 関連度順のみで返す(このとき hasNewest=false をフロントへ伝える)。 */
-  const newest = await fetchNewestReviews(placeId, env);
+  const legacy = await fetchNewestReviews(placeId, env);
+  const newest = legacy && legacy.reviews;
   const relevant = data.reviews || [];
-  const merged = newest ? mergeReviews(relevant, newest) : relevant.map((r) => ({ ...r, _source: "relevant" }));
+  const merged = newest
+    ? mergeReviews(relevant, newest)
+    : relevant.map((r) => ({ ...r, _source: "relevant" }));
 
   return json(
     {
@@ -308,6 +321,9 @@ async function handleDetails(placeId, env, origin) {
         relevantCount: relevant.length,
         newestCount: newest ? newest.length : 0,
         mergedCount: merged.length,
+        /* 取得できなかった理由。運用時の切り分け用 */
+        newestError: newest ? null : (legacy && legacy.reason) || "unknown",
+        newestErrorDetail: (legacy && legacy.detail) || undefined,
       },
     },
     200,
