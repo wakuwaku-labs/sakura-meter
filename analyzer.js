@@ -247,13 +247,35 @@ const Analyzer = (() => {
 
   /* ---- S1: クチコミ本文の定型度 -------------------------------------- */
   function scoreTextPattern(reviews) {
-    const allPositive = (reviews || []).filter((r) => (r.rating || 0) >= 4);
-    const positive = allPositive.filter((r) => isJapanese(r.text));
-    const foreign = allPositive.length - positive.length;
-    if (positive.length < 2) {
+    const japanese = (reviews || []).filter((r) => isJapanese(r.text));
+    const positive = japanese.filter((r) => (r.rating || 0) >= 4);
+    /* ★3以下は「対照群」として使う。サクラを疑うのはあくまで高評価の側
+     * だが、その店の利用者がそもそも短文・定型文しか書かない文化なのか
+     * どうかは、高評価だけを見ていても分からない。低評価クチコミは
+     * 依頼されて書かれたものではないため、その店の「素の書き方」に近い。
+     * これを基準線にすることで、
+     *   「高評価だけが定型的」→ サクラの疑い
+     *   「低評価も同じくらい定型的」→ その店の書き方の傾向にすぎない
+     * を区別できる。従来の代替説明「書き慣れていない利用者が多い店でも
+     * 短文・定型文は自然に増える」を、店ごとの実データで補正する仕組み。 */
+    /* 対照群に文字数の下限を設けてはいけない。「短文しか書かれない店」を
+     * 見分けるのがこの仕組みの目的であり、短い低評価こそが必要な証拠に
+     * なる。長さで足切りすると、対照群が必要な店ほど対照群が取れないと
+     * いう本末転倒が起きる(実際それで動いていなかった)。
+     * isJapanese() が日本語3文字以上を保証しているので、それで足りる。 */
+    const control = japanese.filter(
+      (r) => (r.rating || 0) >= 1 && (r.rating || 0) <= 3
+    );
+    const foreign = (reviews || []).filter(
+      (r) => (r.text || "").trim() && !isJapanese(r.text)
+    ).length;
+
+    /* 高評価が2件揃わなくても、対照群があれば比較として成立する */
+    const enough = positive.length >= 2 || (positive.length >= 1 && control.length >= 1);
+    if (!enough) {
       return insufficient(
         "text_pattern",
-        `本文を分析できる日本語の高評価クチコミが${positive.length}件しかありません(2件以上必要)。`
+        `本文を分析できる日本語のクチコミが足りません(高評価2件以上、または高評価1件と★3以下1件以上が必要。現在は高評価${positive.length}件・★3以下${control.length}件)。`
           + (foreign > 0
               ? `${foreign}件は日本語以外のため対象外としています(本ツールの文章解析は日本語の語彙に依存しており、外国語のクチコミに当てると、具体的な内容でも定型文と誤判定してしまうためです)。`
               : "")
@@ -270,7 +292,19 @@ const Analyzer = (() => {
       }
     }
     const dupBonus = maxSim > 0.35 ? clamp(((maxSim - 0.35) / 0.35) * 30, 0, 30) : 0;
-    const score = clamp(Math.round(meanG * 70 + dupBonus), 0, 100);
+
+    /* 対照群との差分補正。
+     * 低評価は不満を説明する必要があるぶん、本来どの店でも高評価より
+     * 具体的になりやすい。したがって「高評価のほうがやや定型的」は自然な
+     * 状態で、そこを基準(0.10)にして、それを超えた分だけを証拠として扱う。 */
+    let controlG = null;
+    let contrastAdj = 0;
+    if (control.length >= 1) {
+      const cStats = control.map((r) => reviewGenericness(r.text));
+      controlG = cStats.reduce((s, x) => s + x.g, 0) / cStats.length;
+      contrastAdj = clamp((meanG - controlG - 0.10) * 50, -25, 20);
+    }
+    const score = clamp(Math.round(meanG * 70 + dupBonus + contrastAdj), 0, 100);
 
     const genericCount = stats.filter((x) => x.g >= 0.5).length;
     const noSpecific = stats.filter((x) => x.specifics === 0).length;
@@ -287,6 +321,17 @@ const Analyzer = (() => {
     if (dupBonus > 0) {
       ev += ` また、文面が強く類似するクチコミの組があります(類似度 ${(maxSim * 100).toFixed(0)}%)。`;
     }
+    if (controlG != null) {
+      const diff = meanG - controlG;
+      ev += ` この店の★3以下のクチコミ${control.length}件を対照群として比べると、`;
+      if (contrastAdj > 0) {
+        ev += `高評価のほうが明らかに定型的です(定型度 ${meanG.toFixed(2)} 対 ${controlG.toFixed(2)})。同じ店の利用者が書いたものとしては差が大きく、加点しています。`;
+      } else if (diff <= 0) {
+        ev += `低評価のほうが定型的か同程度でした(定型度 ${meanG.toFixed(2)} 対 ${controlG.toFixed(2)})。この店では高評価かどうかに関わらず短い文が多く、その店の書き方の傾向と考えられるため減点しています。`;
+      } else {
+        ev += `差はわずかです(定型度 ${meanG.toFixed(2)} 対 ${controlG.toFixed(2)})。低評価は不満を説明する必要があるぶん元々具体的になりやすく、この程度の差は自然な範囲のため減点しています。`;
+      }
+    }
     if (foreign > 0) {
       ev += ` なお、日本語以外のクチコミ${foreign}件は解析対象から除外しています。`;
     }
@@ -295,7 +340,10 @@ const Analyzer = (() => {
       score,
       included: true,
       evidence: ev,
-      detail: { genericCount, noSpecific, superlativeOnly, reservedCount, maxSim, n: positive.length },
+      detail: {
+        genericCount, noSpecific, superlativeOnly, reservedCount, maxSim,
+        n: positive.length, controlN: control.length, meanG, controlG, contrastAdj,
+      },
     };
   }
 
@@ -310,18 +358,27 @@ const Analyzer = (() => {
    *   揃う。揃っていること自体は証拠にならない。そこで、価格・料理名・
    *   注文内容といった具体的記述が豊富なほどスコアを大きく減衰させる。 */
   function scoreStyleUniformity(reviews) {
-    const all = (reviews || []).filter(
-      (r) => (r.rating || 0) >= 4 && (r.text || "").trim().length >= 10
-    );
     /* 機械翻訳された文は除外する。Googleが外国語のクチコミを翻訳して返す
      * 場合、別人が書いた複数のクチコミが同じ翻訳エンジンの文体になり、
      * 「揃っている」と誤判定してしまう。 */
-    const usable = all.filter((r) => !r.translated && isJapanese(r.text));
-    const excluded = all.length - usable.length;
+    const analyzable = (reviews || []).filter(
+      (r) => (r.text || "").trim().length >= 10 && !r.translated && isJapanese(r.text)
+    );
+    const high = analyzable.filter((r) => (r.rating || 0) >= 4);
+    /* 本来は高評価どうしで比べたい(量産されるのは高評価のため)。
+     * ただし高評価が3件に満たない店では測定自体ができないので、その場合に
+     * 限り★3以下も含めて比べる。評価の高低が混ざると、褒める文と不満を
+     * 述べる文で自然にばらつくぶん判定は甘くなるが、測れないよりはよい。 */
+    const useAll = high.length < 3;
+    const usable = useAll ? analyzable : high;
+    const scope = useAll ? "評価を問わない" : "高評価の";
+    const excluded = (reviews || []).filter(
+      (r) => (r.text || "").trim().length >= 10 && (r.translated || !isJapanese(r.text))
+    ).length;
     if (usable.length < 3) {
       return insufficient(
         "style_uniformity",
-        `文体を比較できる高評価クチコミが${usable.length}件しかありません(3件以上必要)。`
+        `文体を比較できる日本語のクチコミが${usable.length}件しかありません(3件以上必要)。`
           + (excluded > 0 ? `機械翻訳された文と日本語以外の文、あわせて${excluded}件を除外しています(文末表現の型が日本語を前提としているため)。` : "")
       );
     }
@@ -374,9 +431,9 @@ const Analyzer = (() => {
       id: "style_uniformity",
       score,
       included: true,
-      evidence: `別々の投稿者による高評価クチコミ${usable.length}件について、語彙の重なり(全ペア平均)は${(meanSim * 100).toFixed(0)}%、文末表現は${Math.round(topEnd * 100)}%が同じ型、文字数のばらつきは${(cv * 100).toFixed(0)}%です。1件あたりの具体的記述は平均${meanSpec.toFixed(1)}個で、これが多いほど「揃っていても自然」と判断してスコアを${Math.round((1 - gate) * 100)}%減衰させています。`
+      evidence: `別々の投稿者による${scope}クチコミ${usable.length}件について、語彙の重なり(全ペア平均)は${(meanSim * 100).toFixed(0)}%、文末表現は${Math.round(topEnd * 100)}%が同じ型、文字数のばらつきは${(cv * 100).toFixed(0)}%です。1件あたりの具体的記述は平均${meanSpec.toFixed(1)}個で、これが多いほど「揃っていても自然」と判断してスコアを${Math.round((1 - gate) * 100)}%減衰させています。`
         + (excluded > 0 ? ` なお、機械翻訳された${excluded}件は翻訳エンジンの文体に揃ってしまうため除外しました。` : ""),
-      detail: { meanSim, topEnd, cv, meanSpec, gate, n: usable.length, authors: authors.size },
+      detail: { meanSim, topEnd, cv, meanSpec, gate, n: usable.length, authors: authors.size, useAll },
     };
   }
 
@@ -764,8 +821,8 @@ const Analyzer = (() => {
       label: "本文の定型度",
       axis: AXES.text,
       weight: WEIGHTS.textPattern,
-      description: "高評価クチコミの本文が、短文・定型フレーズ・具体性を欠いた絶賛に偏っていないか。文面の使い回し(コピペ)も検出します。逆に、待ち時間や好みが分かれる点といった率直な留保があれば減点します。",
-      altExplanation: "レビューを書き慣れていない利用者が多い店でも、短文・定型文は自然に増えます。テイクアウト中心の店など、書くことが少ない業態でも短くなりがちです。",
+      description: "高評価クチコミの本文が、短文・定型フレーズ・具体性を欠いた絶賛に偏っていないか。文面の使い回し(コピペ)も検出します。率直な留保があれば減点します。さらに、その店の★3以下のクチコミを対照群として比較し、高評価だけが定型的なのか、その店の利用者がもともと短文を書く傾向なのかを区別します。",
+      altExplanation: "レビューを書き慣れていない利用者が多い店でも、短文・定型文は自然に増えます。この点は★3以下との比較である程度は補正していますが、比較できる低評価がない店では補正が効きません。テイクアウト中心の店など、書くことが少ない業態でも短くなりがちです。",
     },
     style_uniformity: {
       label: "文体の均質性",
