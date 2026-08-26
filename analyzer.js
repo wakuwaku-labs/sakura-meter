@@ -30,9 +30,8 @@ const Analyzer = (() => {
     text: "A. 文体・表現",
     timing: "B. 投稿タイミング",
     account: "C. 投稿者アカウント",
-    distribution: "D. 評価分布",
-    level: "E. 評価水準",
-    negative: "F. 低評価クチコミの質",
+    level: "D. 評価水準",
+    negative: "E. 低評価クチコミの質",
   };
 
   /* ---- 定数: シグナル重み (合計 1.0) ----
@@ -43,25 +42,20 @@ const Analyzer = (() => {
    * 評価履歴といった決定的な情報が取得できない。そのため実務上の重要度
    * ほどの重みは置けず、低めの 8% に留めている(限界として開示)。 */
   const WEIGHTS = {
-    textPattern: 0.27,        // A
-    styleUniformity: 0.07,    // A
-    ratingTextGap: 0.09,      // A
-    burst: 0.14,              // B
-    authorPattern: 0.07,      // C
-    ratingDistribution: 0.11, // D
-    ratingAnomaly: 0.08,      // E
-    peerDeviation: 0.07,      // E
-    negativeAttack: 0.10,     // F
+    textPattern: 0.31,        // A
+    styleUniformity: 0.08,    // A
+    ratingTextGap: 0.10,      // A
+    burst: 0.16,              // B
+    authorPattern: 0.08,      // C
+    ratingAnomaly: 0.09,      // D
+    peerDeviation: 0.07,      // D
+    negativeAttack: 0.11,     // E
   };
 
   /* Bayesian 縮約の事前分布: 日本の飲食店の Google 評価は概ね 3.2〜3.9 に
    * 集まるため、事前平均 3.5 / 事前重み 30 件で少件数の高評価を割り引く */
   const PRIOR_MEAN = 3.5;
   const PRIOR_WEIGHT = 30;
-
-  /* 削除(偽の疑い)レビューにおける★5比率の実証値。分布シグナルの基準線 */
-  const FAKE_FIVE_STAR_RATE = 0.74;   // 坂口(2022)
-  const NORMAL_FIVE_STAR_RATE = 0.55; // 同・非削除レビュー
 
   /* 定型的な称賛フレーズ(具体性を伴わない場合にサクラ的とされる表現) */
   const GENERIC_PHRASES = [
@@ -293,13 +287,19 @@ const Analyzer = (() => {
    *   揃う。揃っていること自体は証拠にならない。そこで、価格・料理名・
    *   注文内容といった具体的記述が豊富なほどスコアを大きく減衰させる。 */
   function scoreStyleUniformity(reviews) {
-    const usable = (reviews || []).filter(
+    const all = (reviews || []).filter(
       (r) => (r.rating || 0) >= 4 && (r.text || "").trim().length >= 10
     );
+    /* 機械翻訳された文は除外する。Googleが外国語のクチコミを翻訳して返す
+     * 場合、別人が書いた複数のクチコミが同じ翻訳エンジンの文体になり、
+     * 「揃っている」と誤判定してしまう。 */
+    const usable = all.filter((r) => !r.translated);
+    const excluded = all.length - usable.length;
     if (usable.length < 3) {
       return insufficient(
         "style_uniformity",
         `文体を比較できる高評価クチコミが${usable.length}件しかありません(3件以上必要)。`
+          + (excluded > 0 ? `機械翻訳された${excluded}件は、翻訳エンジンの文体に揃ってしまうため除外しています。` : "")
       );
     }
     const authors = new Set(usable.map((r) => r.author || ""));
@@ -351,7 +351,8 @@ const Analyzer = (() => {
       id: "style_uniformity",
       score,
       included: true,
-      evidence: `別々の投稿者による高評価クチコミ${usable.length}件について、語彙の重なり(全ペア平均)は${(meanSim * 100).toFixed(0)}%、文末表現は${Math.round(topEnd * 100)}%が同じ型、文字数のばらつきは${(cv * 100).toFixed(0)}%です。1件あたりの具体的記述は平均${meanSpec.toFixed(1)}個で、これが多いほど「揃っていても自然」と判断してスコアを${Math.round((1 - gate) * 100)}%減衰させています。`,
+      evidence: `別々の投稿者による高評価クチコミ${usable.length}件について、語彙の重なり(全ペア平均)は${(meanSim * 100).toFixed(0)}%、文末表現は${Math.round(topEnd * 100)}%が同じ型、文字数のばらつきは${(cv * 100).toFixed(0)}%です。1件あたりの具体的記述は平均${meanSpec.toFixed(1)}個で、これが多いほど「揃っていても自然」と判断してスコアを${Math.round((1 - gate) * 100)}%減衰させています。`
+        + (excluded > 0 ? ` なお、機械翻訳された${excluded}件は翻訳エンジンの文体に揃ってしまうため除外しました。` : ""),
       detail: { meanSim, topEnd, cv, meanSpec, gate, n: usable.length, authors: authors.size },
     };
   }
@@ -527,85 +528,7 @@ const Analyzer = (() => {
   }
 
   /* =====================================================================
-   * D. 評価分布の軸
-   * ===================================================================== */
-
-  /* 分布入力を {p1..p5, total, mean} に正規化。件数でも割合でも可 */
-  function normalizeDistribution(dist) {
-    if (!dist) return null;
-    const raw = [1, 2, 3, 4, 5].map((k) => Number(dist[k] ?? dist[String(k)] ?? 0));
-    if (raw.some((v) => !isFinite(v) || v < 0)) return null;
-    const sum = raw.reduce((a, b) => a + b, 0);
-    if (sum <= 0) return null;
-    const p = raw.map((v) => v / sum);
-    const mean = raw.reduce((s, v, i) => s + v * (i + 1), 0) / sum;
-    return { p1: p[0], p2: p[1], p3: p[2], p4: p[3], p5: p[4], sum, mean };
-  }
-
-  /* ---- S6: 評価分布の形(お椀型・★5偏重) ------------------------------ */
-  function scoreRatingDistribution(dist, userRatingCount, rating) {
-    const d = normalizeDistribution(dist);
-    if (!d) {
-      return insufficient(
-        "rating_distribution",
-        "星ごとの件数(分布)が未入力です。Google公式APIは分布を提供していないため、分析画面の「星の分布を入力」から入力すると、この観点も採点できるようになります。"
-      );
-    }
-    if ((userRatingCount || 0) < 20) {
-      return insufficient(
-        "rating_distribution",
-        `総クチコミ数が${userRatingCount || 0}件と少なく、分布の形からの判断は誤差が大きすぎます(20件以上必要)。`
-      );
-    }
-    /* 入力の整合性チェック: 入力分布から計算した平均が、実際に表示されて
-     * いる平均評価と大きくずれている場合、入力ミスの可能性が高い。
-     * 誤った入力がスコアを押し上げるのを防ぐため、ずれが大きければ
-     * このシグナル自体を採点対象から外す。 */
-    let fitNote = "";
-    if (rating != null) {
-      const gap = Math.abs(d.mean - rating);
-      if (gap > 0.3) {
-        return insufficient(
-          "rating_distribution",
-          `入力された分布から計算される平均は ${d.mean.toFixed(2)} で、実際に表示されている評価 ${rating.toFixed(1)} と ${gap.toFixed(2)} ずれています。入力ミスの可能性が高いため、この観点は採点から除外しました。バーの長さを調整し直してください。`
-        );
-      }
-      if (gap > 0.15) {
-        fitNote = ` なお、入力分布から計算される平均(${d.mean.toFixed(2)})は実際の評価(${rating.toFixed(1)})と ${gap.toFixed(2)} ずれています。入力を見直すと精度が上がります。`;
-      }
-    }
-
-    const pMid = d.p2 + d.p3 + d.p4;
-
-    /* ★5比率: 通常55% / 偽の疑い74%(坂口2022)を基準線に採点 */
-    const excess5 = piecewise(d.p5, [
-      [NORMAL_FIVE_STAR_RATE, 0], [0.65, 20], [FAKE_FIVE_STAR_RATE, 45],
-      [0.85, 75], [0.95, 100],
-    ]);
-
-    /* お椀型(U字): ★1が中間評価(★2〜4)を圧倒しているか */
-    const uRatio = d.p1 / (pMid + d.p1 + 1e-9);
-    const uScore = piecewise(uRatio, [[0.15, 0], [0.30, 35], [0.50, 70], [0.70, 100]]);
-
-    const score = clamp(Math.round(0.6 * excess5 + 0.4 * uScore), 0, 100);
-
-    const pct = (x) => `${(x * 100).toFixed(1)}%`;
-    let ev = `入力された分布は ★5 ${pct(d.p5)} / ★4〜2(中間) ${pct(pMid)} / ★1 ${pct(d.p1)} です。`;
-    ev += ` 実証研究では、通常のレビューの★5比率が55%前後であるのに対し、偽の疑いで削除されたレビューでは74%に達すると報告されています。`;
-    if (uRatio >= 0.3) {
-      ev += ` また、中間評価が薄く★5と★1に割れる「お椀型」の特徴が出ています(★1が★1〜4合計の${Math.round(uRatio * 100)}%)。`;
-    }
-    return {
-      id: "rating_distribution",
-      score,
-      included: true,
-      evidence: ev + fitNote,
-      detail: { p5: d.p5, p1: d.p1, pMid, uRatio, mean: d.mean, sum: d.sum },
-    };
-  }
-
-  /* =====================================================================
-   * E. 評価水準の軸
+   * D. 評価水準の軸
    * ===================================================================== */
 
   /* ---- S7: 評価水準の統計的偏り -------------------------------------- */
@@ -657,7 +580,7 @@ const Analyzer = (() => {
   }
 
   /* =====================================================================
-   * F. 低評価クチコミの質の軸
+   * E. 低評価クチコミの質の軸
    *
    * 「★1の中でも、文言がかなり酷評になっているものが多数ある」場合を
    * 捉える。これは高評価の水増しとは逆方向の操作(競合など第三者による
@@ -695,7 +618,7 @@ const Analyzer = (() => {
   }
 
   /* ---- S9: 低評価クチコミの酷評度 ------------------------------------ */
-  function scoreNegativeAttack(reviews, dist) {
+  function scoreNegativeAttack(reviews) {
     const low = (reviews || []).filter((r) => (r.rating || 0) > 0 && (r.rating || 0) <= 2);
     if (low.length < 2) {
       return insufficient(
@@ -736,13 +659,6 @@ const Analyzer = (() => {
         score += 15;
         parts.push(`${dated.length}件の低評価が${clusterDays}日以内に集中しています`);
       }
-    }
-
-    /* 分布が入力済みなら、★1が実際に多いことを裏づけとして加点 */
-    const d = normalizeDistribution(dist);
-    if (d && d.p1 >= 0.10) {
-      score += 10;
-      parts.push(`全体の★1比率も ${(d.p1 * 100).toFixed(1)}% と高めです`);
     }
 
     score = clamp(Math.round(score), 0, 100);
@@ -800,13 +716,6 @@ const Analyzer = (() => {
       description: "姓名フルネーム型の表示名の比率と、同一表示名の重複。業者が典型的な氏名リストからアカウントを量産する際の特徴とされます。",
       altExplanation: "実名で普通に使っている利用者も多く、単独では非常に弱い手掛かりです。本来この軸(投稿者のレビュー総数・プロフィール・他店への評価履歴)は最も有効とされますが、Google公式APIは表示名しか提供しないため、重みを低く設定しています。",
     },
-    rating_distribution: {
-      label: "評価分布の形",
-      axis: AXES.distribution,
-      weight: WEIGHTS.ratingDistribution,
-      description: "★5への偏りと、中間評価(★2〜4)が薄く★5と★1に割れる「お椀型」の度合い。実証研究では、偽の疑いで削除されたレビューは★1・★5に極端化することが確認されています。",
-      altExplanation: "純粋に評価の高い人気店でも★5比率は高くなります。またクレーム対応がこじれた一件で★1が付くこともあり、お椀型が必ずサクラを意味するわけではありません。",
-    },
     rating_anomaly: {
       label: "評価水準の偏り",
       axis: AXES.level,
@@ -833,7 +742,7 @@ const Analyzer = (() => {
   /* 表示順(4軸の順に並べる) */
   const SIGNAL_ORDER = [
     "text_pattern", "style_uniformity", "rating_text_gap",
-    "burst", "author_pattern", "rating_distribution",
+    "burst", "author_pattern",
     "rating_anomaly", "peer_deviation", "negative_attack",
   ];
 
@@ -898,15 +807,6 @@ const Analyzer = (() => {
       "unknown",
       "Google公式APIが提供しないため、本ツールでは確認できません(Googleマップ上で投稿者名をタップすると手動で確認できます)"));
 
-    /* D. 分布 */
-    const rd = s("rating_distribution"), rdd = d("rating_distribution");
-    list.push(item(AXES.distribution, "★5比率が74%以上(偽の疑いレビューの水準)",
-      rd.included ? (rdd.p5 >= FAKE_FIVE_STAR_RATE ? "hit" : "clear") : "unknown",
-      rd.included ? `★5比率 ${(rdd.p5 * 100).toFixed(1)}%` : "星の分布が未入力"));
-    list.push(item(AXES.distribution, "中間評価が薄い「お椀型」の分布",
-      rd.included ? (rdd.uRatio >= 0.3 ? "hit" : "clear") : "unknown",
-      rd.included ? `★1が★1〜4合計の${Math.round(rdd.uRatio * 100)}%` : "星の分布が未入力"));
-
     /* E. 評価水準 */
     const pd = s("peer_deviation"), pdd = d("peer_deviation");
     list.push(item(AXES.level, "周辺店舗の相場から+2σ以上突出",
@@ -932,6 +832,45 @@ const Analyzer = (() => {
     return { items: list, hits, judged, total: list.length };
   }
 
+  /* ---- 表示サンプルの偏り ---------------------------------------------
+   * Google公式APIは星ごとの件数(分布)を返さないため、★1がどれだけ
+   * あるかは直接わからない。ただし「返ってきた5件の平均」と「店舗全体の
+   * 平均」を比べれば、表示されているクチコミが実態からどちらへずれて
+   * いるかは計算できる。スコアには入れず、読み手への注意書きとして返す。
+   *
+   *   全体平均より高い → 低評価が表示分に含まれていない
+   *                      (低評価側の分析ができていない可能性)
+   *   全体平均より低い → 低評価が関連度上位を占めている
+   *
+   * これは操作の証拠ではなく、Googleの関連度選択のクセでも生じる。 */
+  function assessSampleBias(place, reviews) {
+    const rated = (reviews || []).filter((r) => (r.rating || 0) >= 1);
+    if (rated.length < 3 || place.rating == null) return null;
+    const sampleMean = rated.reduce((sum, r) => sum + r.rating, 0) / rated.length;
+    const gap = sampleMean - place.rating;
+    if (Math.abs(gap) < 0.5) return null;
+
+    const lowInSample = rated.filter((r) => r.rating <= 2).length;
+    const common = `表示できたクチコミ${rated.length}件の平均は ${sampleMean.toFixed(1)} で、店舗全体の平均 ${place.rating.toFixed(1)} と ${Math.abs(gap).toFixed(1)} 離れています。`;
+
+    if (gap > 0) {
+      return {
+        key: "hidden-low",
+        label: "表示されているクチコミは、店舗全体より高評価に偏っています",
+        note: common + `つまり、ここに表示されていないところに低評価がまとまって存在します。`
+          + (lowInSample < 2
+              ? "低評価の本文が取得できていないため、低評価側の分析(E軸)は行えていません。「判定不可」は「低評価工作がない」という意味ではありません。"
+              : "")
+          + "Googleマップで低評価のクチコミをご自身でも確認されることをおすすめします。",
+      };
+    }
+    return {
+      key: "low-surfaced",
+      label: "表示されているクチコミは、店舗全体より低評価に偏っています",
+      note: common + "低評価が関連度の上位を占めている状態です。新しい低評価が集中的に投稿された直後にも起こります。",
+    };
+  }
+
   /* ---- メイン: analyze ------------------------------------------------ */
   function analyze(place, peers) {
     const reviews = place.reviews || [];
@@ -941,10 +880,9 @@ const Analyzer = (() => {
       scoreRatingTextGap(reviews),
       scoreBurst(reviews, place.userRatingCount),
       scoreAuthorPattern(reviews),
-      scoreRatingDistribution(place.ratingDistribution, place.userRatingCount, place.rating),
       scoreRatingAnomaly(place.rating, place.userRatingCount),
       scorePeerDeviation(place.rating, peers),
-      scoreNegativeAttack(reviews, place.ratingDistribution),
+      scoreNegativeAttack(reviews),
     ];
 
     const byId = {};
@@ -1037,9 +975,9 @@ const Analyzer = (() => {
       checklist,
       direction,
       signals,
+      sampleBias: assessSampleBias(place, reviews),
       sampleSize: reviews.length,
       analyzable: totalWeight > 0,
-      hasDistribution: !!normalizeDistribution(place.ratingDistribution),
     };
   }
 
@@ -1115,7 +1053,6 @@ const Analyzer = (() => {
     const peerCount = (peers || []).filter(
       (p) => p && p.rating != null && (p.userRatingCount || 0) >= 5
     ).length;
-    const hasDist = !!normalizeDistribution(place.ratingDistribution) && count >= 20;
     const reasons = [];
 
     let level, label;
@@ -1125,15 +1062,14 @@ const Analyzer = (() => {
       if (n < 3) reasons.push(`分析できたクチコミが${n}件と少ない`);
       if (count < 10) reasons.push(`総クチコミ数が${count}件と少ない`);
       if (includedCount < 3) reasons.push("有効なシグナルが3つ未満");
-    } else if (n >= 5 && peerCount >= 5 && count >= 50 && hasDist && includedCount >= 6) {
+    } else if (n >= 5 && peerCount >= 5 && count >= 50 && includedCount >= 6) {
       level = "high";
       label = "高";
-      reasons.push(`クチコミ${n}件・周辺比較${peerCount}店舗・総数${count}件に加え、星の分布(4軸すべて)が揃っています`);
+      reasons.push(`クチコミ${n}件・周辺比較${peerCount}店舗・総数${count}件を分析`);
     } else {
       level = "mid";
       label = "中";
       reasons.push(`クチコミ${n}件・有効シグナル${includedCount}/8を分析`);
-      if (!hasDist && count >= 20) reasons.push("星の分布を入力すると信頼度が上がります");
       if (peerCount < 5) reasons.push("周辺店舗の比較データが不足");
     }
     return { level, label, reasons };
@@ -1141,11 +1077,10 @@ const Analyzer = (() => {
 
   return {
     analyze, WEIGHTS, SIGNAL_META, SIGNAL_ORDER, POSITIVE_SIDE_IDS, BANDS, AXES,
-    FAKE_FIVE_STAR_RATE, NORMAL_FIVE_STAR_RATE,
     /* テスト用に内部関数も公開 */
     _internal: {
       reviewGenericness, reviewHostility, bigramSimilarity, piecewise, isFullNameStyle,
-      normalizeDistribution, minWindow, countSpecifics, endingForm,
+      minWindow, countSpecifics, endingForm,
     },
   };
 })();

@@ -360,10 +360,17 @@
   }
 
   function normalizeSharedReview(r) {
-    const text = (r.text && r.text.text) || (r.originalText && r.originalText.text) || "";
+    /* 解析には必ず「投稿者が実際に書いた文」(originalText)を使う。
+     * Googleは外国語のクチコミを機械翻訳して text に入れて返すため、
+     * 翻訳文を解析すると、別人が書いた複数のクチコミが同じ翻訳エンジンの
+     * 文体になり「文体の均質性」が誤って跳ね上がる。 */
+    const original = (r.originalText && r.originalText.text) || "";
+    const shown = (r.text && r.text.text) || "";
+    const text = original || shown;
     return {
       rating: r.rating ?? null,
       text,
+      translated: !!(original && shown && original !== shown),
       publishTime: r.publishTime || null,
       author: (r.authorAttribution && r.authorAttribution.displayName) || "Googleユーザー",
       relative: r.relativePublishTimeDescription || "",
@@ -371,13 +378,19 @@
   }
 
   function normalizeLiveReview(r) {
+    /* 共有モードと同じ理由で、原文(originalText)を優先する */
+    let original = r.originalText;
+    if (original && typeof original === "object") original = original.text ?? "";
     let text = r.text;
     if (text && typeof text === "object") text = text.text ?? "";
+    const translated = !!(original && text && original !== text);
+    if (original) text = original;
     let publishTime = r.publishTime;
     if (publishTime instanceof Date) publishTime = publishTime.toISOString();
     return {
       rating: r.rating ?? null,
       text: text || "",
+      translated,
       publishTime: publishTime || null,
       author: (r.authorAttribution && r.authorAttribution.displayName) || "Googleユーザー",
       relative: r.relativePublishTimeDescription || "",
@@ -470,7 +483,6 @@
 
     const negativeHtml = negativeMeterHtml(r);
     const checklistHtml = checklistSectionHtml(r);
-    const distHtml = distributionSectionHtml(place, r);
 
     const reviews = place.reviews || [];
     const reviewsHtml = `
@@ -486,10 +498,9 @@
         </div>
       </section>`;
 
-    panel.innerHTML = headerHtml + gaugeHtml + negativeHtml + checklistHtml + signalsHtml +
-                      distHtml + reviewsHtml + disclaimerHtml();
+    panel.innerHTML = headerHtml + gaugeHtml + sampleBiasHtml(r) + negativeHtml +
+                      checklistHtml + signalsHtml + reviewsHtml + disclaimerHtml();
     bindModalButtons(panel);
-    bindDistributionForm(place);
 
     /* ゲージのアニメーション(reduced-motion環境ではCSS側で無効化) */
     requestAnimationFrame(() => {
@@ -531,6 +542,15 @@
         <p class="negative-body">${esc(sig.evidence)}</p>
         <p class="negative-alt"><span class="tag">読み方</span>この数値が高い場合、疑われるのは<strong>お店ではなく、低評価を書いた側</strong>です。競合による中傷や事実無根の投稿は、Googleへの削除申請の対象になり得ます。ただし、本当にひどい体験をした利用者が強い言葉で短く書くこともあり、これだけで工作と断定はできません。</p>
       </section>`;
+  }
+
+  /* ---- 表示サンプルの偏り(注意書き・スコアではない) ------------------ */
+  function sampleBiasHtml(r) {
+    const b = r.sampleBias;
+    if (!b) return "";
+    return `<p class="sample-bias ${b.key}">
+      <strong>${esc(b.label)}</strong>${esc(b.note)}
+    </p>`;
   }
 
   /* ---- チェックリスト(4軸12項目) ---------------------------------- */
@@ -584,152 +604,6 @@
             </div>`).join("")}
         </div>
       </section>`;
-  }
-
-  /* ---- 星の分布の手入力(精度向上オプション) ------------------------ */
-  const DIST_STARS = [5, 4, 3, 2, 1];
-
-  /* 平均評価から、それらしい初期分布を生成してスライダーの出発点にする */
-  function seedDistribution(rating) {
-    const R = rating == null ? 4.0 : rating;
-    const w = {};
-    DIST_STARS.forEach((k) => {
-      w[k] = Math.exp(-Math.abs(k - R) * 1.5);
-    });
-    w[1] = Math.max(w[1], 0.03); // ★1は常に少し存在するのが普通
-    const max = Math.max(...DIST_STARS.map((k) => w[k]));
-    const out = {};
-    DIST_STARS.forEach((k) => (out[k] = Math.max(1, Math.round((w[k] / max) * 100))));
-    return out;
-  }
-
-  function distributionSectionHtml(place, r) {
-    const count = place.userRatingCount || 0;
-    if (count < 20) {
-      return `
-        <section class="dist-section">
-          <h3>星の分布 <span class="section-note">この店舗では利用できません</span></h3>
-          <p class="dist-lede">総クチコミ数が${count}件と少なく、分布の形から判断すると誤差が大きすぎるため、この入力は無効にしています(20件以上で利用できます)。</p>
-        </section>`;
-    }
-    const applied = place.ratingDistribution || null;
-    const vals = applied ? normalizeToSliders(applied) : seedDistribution(place.rating);
-
-    return `
-      <section class="dist-section">
-        <details class="dist-details"${applied ? "" : " open"}>
-          <summary>
-            <span class="dist-title">星の分布を入力して精度を上げる</span>
-            <span class="dist-state ${applied ? "on" : "off"}">${applied ? "入力済み — 分析に反映中" : "未入力 — 1つのシグナルが対象外です"}</span>
-          </summary>
-          <div class="dist-body">
-            <p class="dist-lede">
-              Googleの公式APIは<strong>星ごとの件数(分布)を提供していません</strong>。
-              Googleマップの店舗ページに出ている棒グラフを見ながら、5本のバーの長さを近づけてください。
-              「★5と★1に割れて中間が凹むお椀型」は、実証研究で偽レビューに特徴的とされる形です。
-            </p>
-            <div class="dist-rows">
-              ${DIST_STARS.map((k) => `
-                <label class="dist-row">
-                  <span class="dist-star">★${k}</span>
-                  <input type="range" min="0" max="100" step="1" value="${vals[k]}" data-star="${k}">
-                  <output class="dist-out" data-out="${k}">${vals[k]}</output>
-                </label>`).join("")}
-            </div>
-            <div class="dist-readout" id="dist-readout"></div>
-            <div class="dist-actions">
-              <button class="btn-primary" type="button" id="dist-apply">この分布で再分析</button>
-              ${applied ? `<button class="btn-secondary" type="button" id="dist-clear">入力を取り消す</button>` : ""}
-            </div>
-            <p class="dist-note">入力値はこの画面の中だけで使われ、保存も送信もされません。</p>
-          </div>
-        </details>
-      </section>`;
-  }
-
-  /* 保存済みの件数分布を 0-100 のスライダー値に戻す */
-  function normalizeToSliders(dist) {
-    const raw = {};
-    DIST_STARS.forEach((k) => (raw[k] = Number(dist[k] ?? 0)));
-    const max = Math.max(...DIST_STARS.map((k) => raw[k]), 1);
-    const out = {};
-    DIST_STARS.forEach((k) => (out[k] = Math.round((raw[k] / max) * 100)));
-    return out;
-  }
-
-  function bindDistributionForm(place) {
-    const panel = $("#analysis-panel");
-    const sliders = [...panel.querySelectorAll('.dist-row input[type="range"]')];
-    if (sliders.length === 0) return;
-
-    const readCurrent = () => {
-      const d = {};
-      sliders.forEach((el) => (d[el.dataset.star] = Number(el.value)));
-      return d;
-    };
-
-    const refresh = () => {
-      const d = readCurrent();
-      sliders.forEach((el) => {
-        const out = panel.querySelector(`[data-out="${el.dataset.star}"]`);
-        if (out) out.textContent = el.value;
-      });
-      const total = DIST_STARS.reduce((s, k) => s + d[k], 0);
-      const readout = panel.querySelector("#dist-readout");
-      if (!readout) return;
-      if (total <= 0) {
-        readout.innerHTML = `<span class="dist-warn">すべて0では分布になりません。バーの長さを設定してください。</span>`;
-        return;
-      }
-      const mean = DIST_STARS.reduce((s, k) => s + d[k] * k, 0) / total;
-      const p5 = (d[5] / total) * 100;
-      const actual = place.rating;
-      const diff = actual != null ? mean - actual : null;
-      const ok = diff != null && Math.abs(diff) <= 0.1;
-      readout.innerHTML = `
-        <span>この分布から計算した平均: <strong>${mean.toFixed(2)}</strong></span>
-        ${actual != null ? `<span>実際の表示評価: <strong>${actual.toFixed(1)}</strong></span>` : ""}
-        ${diff != null
-          ? `<span class="dist-fit ${ok ? "ok" : "off"}">${ok
-              ? "一致しています(この分布で問題ありません)"
-              : `${diff > 0 ? "高すぎます" : "低すぎます"}(差 ${diff.toFixed(2)}) — バーの長さを調整してください`}</span>`
-          : ""}
-        <span class="dist-p5">★5の割合: ${p5.toFixed(1)}%</span>`;
-    };
-
-    sliders.forEach((el) => el.addEventListener("input", refresh));
-    refresh();
-
-    const applyBtn = panel.querySelector("#dist-apply");
-    if (applyBtn) {
-      applyBtn.addEventListener("click", () => {
-        const d = readCurrent();
-        const total = DIST_STARS.reduce((s, k) => s + d[k], 0);
-        if (total <= 0) return;
-        /* スライダーの相対値を、実際の総クチコミ数に合わせた件数へ変換 */
-        const n = place.userRatingCount || 0;
-        const counts = {};
-        DIST_STARS.forEach((k) => (counts[k] = Math.round((d[k] / total) * n)));
-        place.ratingDistribution = counts;
-        reanalyze(place);
-      });
-    }
-    const clearBtn = panel.querySelector("#dist-clear");
-    if (clearBtn) {
-      clearBtn.addEventListener("click", () => {
-        delete place.ratingDistribution;
-        reanalyze(place);
-      });
-    }
-  }
-
-  function reanalyze(place) {
-    const peers = state.places.filter((p) => p.id !== place.id);
-    try {
-      renderAnalysis(place, Analyzer.analyze(place, peers));
-    } catch (err) {
-      console.error(err);
-    }
   }
 
   function signalItemHtml(s) {

@@ -5,10 +5,6 @@
  * 実在の店舗・人物とは一切関係ありません。投稿者名は、架空の地名から
  * 作った実在しない氏名・ニックネームです。
  * APIキーなしでアプリの動作を体験するためのサンプルです。
- *
- * ratingDistribution は「★1〜★5それぞれの件数」。Google公式APIは
- * この分布を提供しないため、実店舗では利用者の手入力で補います。
- * デモではあらかじめ設定し、「評価分布の形」シグナルの動きを示します。
  * ========================================================================= */
 
 const DEMO_PLACES = [
@@ -21,7 +17,6 @@ const DEMO_PLACES = [
     rating: 4.8,
     userRatingCount: 342,
     priceLevel: 3,
-    ratingDistribution: { 5: 320, 4: 4, 3: 2, 2: 2, 1: 14 },
     demoNote: "短期間に定型的な★5が集中し、分布も「お椀型」になるパターンの例",
     reviews: [
       { rating: 5, author: "花見 太一", publishTime: "2025-06-01T19:20:00+09:00",
@@ -51,7 +46,6 @@ const DEMO_PLACES = [
     rating: 4.3,
     userRatingCount: 187,
     priceLevel: 2,
-    ratingDistribution: { 5: 110, 4: 45, 3: 20, 2: 7, 1: 5 },
     demoNote: "具体的な長文クチコミが長期間に分布する健全な例",
     reviews: [
       { rating: 5, author: "そば散歩", publishTime: "2025-05-10T13:20:00+09:00",
@@ -77,7 +71,6 @@ const DEMO_PLACES = [
     rating: 4.5,
     userRatingCount: 94,
     priceLevel: 2,
-    ratingDistribution: { 5: 63, 4: 21, 3: 6, 2: 2, 1: 2 },
     demoNote: "定型文と具体的なクチコミが混在する中間的な例",
     reviews: [
       { rating: 5, author: "戎 一郎", publishTime: "2025-04-12T22:15:00+09:00",
@@ -101,7 +94,6 @@ const DEMO_PLACES = [
     rating: 4.6,
     userRatingCount: 1520,
     priceLevel: 1,
-    ratingDistribution: { 5: 1090, 4: 320, 3: 60, 2: 30, 1: 20 },
     demoNote: "評価は高いが本文が具体的で分布も自然な人気店の例(高評価=サクラではない)",
     reviews: [
       { rating: 5, author: "煮干し中毒", publishTime: "2025-05-30T11:45:00+09:00",
@@ -125,7 +117,6 @@ const DEMO_PLACES = [
     rating: 4.9,
     userRatingCount: 11,
     priceLevel: 1,
-    ratingDistribution: { 5: 10, 4: 1, 3: 0, 2: 0, 1: 0 },
     demoNote: "クチコミが少なく信頼度が「低」になる例(開店直後の店など)",
     reviews: [
       { rating: 5, author: "プリン部", publishTime: "2025-07-02T15:10:00+09:00",
@@ -143,7 +134,6 @@ const DEMO_PLACES = [
     rating: 3.7,
     userRatingCount: 58,
     priceLevel: 2,
-    ratingDistribution: { 5: 17, 4: 20, 3: 12, 2: 5, 1: 4 },
     demoNote: "平均的な評価水準の例",
     reviews: [
       { rating: 4, author: "白和えの人", publishTime: "2025-03-11T19:30:00+09:00",
@@ -165,7 +155,6 @@ const DEMO_PLACES = [
     rating: 4.7,
     userRatingCount: 210,
     priceLevel: 3,
-    ratingDistribution: { 5: 180, 4: 15, 3: 3, 2: 4, 1: 8 },
     demoNote: "文面の使い回しと、フルネーム型アカウントが目立つ例",
     reviews: [
       { rating: 5, author: "陽光 一郎", publishTime: "2025-05-18T20:10:00+09:00",
@@ -189,7 +178,6 @@ const DEMO_PLACES = [
     rating: 3.6,
     userRatingCount: 128,
     priceLevel: 1,
-    ratingDistribution: { 5: 58, 4: 27, 3: 8, 2: 5, 1: 30 },
     demoNote: "具体性のない酷評★1が短期間に集中する例(第三者による低評価工作が疑われる・お店が被害者の側)",
     reviews: [
       { rating: 1, author: "架空 剛", publishTime: "2025-07-10T20:15:00+09:00",

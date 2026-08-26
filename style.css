@@ -944,95 +944,6 @@ a { color: var(--accent); }
 
 .check-detail { font-size: 0.72rem; color: var(--ink-3); line-height: 1.5; }
 
-/* --- 星の分布の手入力 --- */
-.dist-section { margin-top: 22px; }
-
-.dist-details {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-}
-
-.dist-details > summary {
-  list-style: none;
-  cursor: pointer;
-  padding: 11px 13px;
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.dist-details > summary::-webkit-details-marker { display: none; }
-
-.dist-title {
-  font-family: var(--font-display);
-  font-size: 0.94rem;
-  font-weight: 700;
-}
-
-.dist-state {
-  font-size: 0.72rem;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-weight: 700;
-}
-
-.dist-state.on { background: var(--band-low-soft); color: var(--band-low); }
-.dist-state.off { background: var(--band-mild-soft); color: var(--band-mild); }
-
-.dist-body { padding: 0 13px 13px; }
-
-.dist-lede {
-  margin: 0 0 12px;
-  font-size: 0.8rem;
-  line-height: 1.75;
-  color: var(--ink-2);
-}
-
-.dist-rows { display: flex; flex-direction: column; gap: 7px; }
-
-.dist-row {
-  display: grid;
-  grid-template-columns: 34px 1fr 38px;
-  align-items: center;
-  gap: 10px;
-}
-
-.dist-star { font-size: 0.78rem; font-weight: 700; color: var(--ink-2); }
-
-.dist-row input[type="range"] { width: 100%; accent-color: var(--sakura); }
-
-.dist-out {
-  font-size: 0.74rem;
-  color: var(--ink-3);
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-.dist-readout {
-  margin-top: 12px;
-  padding: 9px 11px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 16px;
-  font-size: 0.76rem;
-  color: var(--ink-2);
-}
-
-.dist-fit { font-weight: 700; }
-.dist-fit.ok { color: var(--band-low); }
-.dist-fit.off { color: var(--band-caution); }
-.dist-warn { color: var(--band-caution); }
-.dist-p5 { color: var(--ink-3); }
-
-.dist-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
-
-.dist-note { margin: 9px 0 0; font-size: 0.72rem; color: var(--ink-3); }
-
 @media (max-width: 520px) {
   .checklist-groups { grid-template-columns: 1fr; }
 }
@@ -1149,3 +1060,23 @@ a { color: var(--accent); }
 @media (prefers-reduced-motion: reduce) {
   .negative-bar-fill { transition: none; }
 }
+
+/* --- 表示サンプルの偏り(注意書き) --- */
+.sample-bias {
+  margin: 18px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--band-mild);
+  background: var(--band-mild-soft);
+  font-size: 0.79rem;
+  line-height: 1.8;
+  color: var(--ink-2);
+}
+
+.sample-bias strong { display: block; margin-bottom: 3px; color: var(--band-mild); }
+
+.sample-bias.low-surfaced {
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+.sample-bias.low-surfaced strong { color: var(--accent-strong); }
