@@ -30,8 +30,8 @@ const Analyzer = (() => {
     text: "A. 文体・表現",
     timing: "B. 投稿タイミング",
     account: "C. 投稿者アカウント",
-    distribution: "D. 評価分布",
-    level: "E. 評価水準",
+    level: "D. 評価水準",
+    negative: "E. 低評価クチコミの質",
   };
 
   /* ---- 定数: シグナル重み (合計 1.0) ----
@@ -42,24 +42,20 @@ const Analyzer = (() => {
    * 評価履歴といった決定的な情報が取得できない。そのため実務上の重要度
    * ほどの重みは置けず、低めの 8% に留めている(限界として開示)。 */
   const WEIGHTS = {
-    textPattern: 0.30,        // A
+    textPattern: 0.31,        // A
     styleUniformity: 0.08,    // A
     ratingTextGap: 0.10,      // A
-    burst: 0.15,              // B
+    burst: 0.16,              // B
     authorPattern: 0.08,      // C
-    ratingDistribution: 0.12, // D
-    ratingAnomaly: 0.09,      // E
-    peerDeviation: 0.08,      // E
+    ratingAnomaly: 0.09,      // D
+    peerDeviation: 0.07,      // D
+    negativeAttack: 0.11,     // E
   };
 
   /* Bayesian 縮約の事前分布: 日本の飲食店の Google 評価は概ね 3.2〜3.9 に
    * 集まるため、事前平均 3.5 / 事前重み 30 件で少件数の高評価を割り引く */
   const PRIOR_MEAN = 3.5;
   const PRIOR_WEIGHT = 30;
-
-  /* 削除(偽の疑い)レビューにおける★5比率の実証値。分布シグナルの基準線 */
-  const FAKE_FIVE_STAR_RATE = 0.74;   // 坂口(2022)
-  const NORMAL_FIVE_STAR_RATE = 0.55; // 同・非削除レビュー
 
   /* 定型的な称賛フレーズ(具体性を伴わない場合にサクラ的とされる表現) */
   const GENERIC_PHRASES = [
@@ -77,6 +73,28 @@ const Analyzer = (() => {
     "間違いない", "絶品", "感動", "大満足", "ハズレなし", "リピ確定",
     "言うことなし", "完璧", "パーフェクト", "最強", "神", "至福",
     "生涯", "涙が出",
+  ];
+
+  /* 酷評・攻撃表現。低評価クチコミが「具体的な不満の説明」ではなく
+   * 「罵倒だけ」になっていないかを見るための語彙。
+   * 注意: 本物の怒った利用者もこれらの語を使う。単独では証拠にならず、
+   *      「酷評 × 具体性の欠如」の組み合わせで初めて意味を持つ。 */
+  const ATTACK_PHRASES = [
+    "最悪", "最低", "二度と", "ありえない", "あり得ない", "ふざけ",
+    "詐欺", "ぼったくり", "ぼられ", "金返せ", "金返し", "返金しろ",
+    "潰れ", "つぶれろ", "行く価値", "行かない方", "来ない方",
+    "おすすめしません", "お勧めしません", "勧めません",
+    "不衛生", "汚い", "きたない", "不潔", "虫が",
+    "態度が悪", "無愛想", "無礼", "失礼", "偉そう", "上から目線",
+    "腹が立", "ムカつ", "不快", "気分が悪",
+    "騙され", "だまされ", "嘘", "地雷", "残飯", "食えたもの",
+    "まずい", "不味い", "訴え",
+  ];
+
+  /* 上のうち、本物の利用者はまず書かない強い全否定・人格攻撃 */
+  const SEVERE_ATTACK_PHRASES = [
+    "潰れ", "つぶれろ", "詐欺", "騙され", "だまされ", "金返せ",
+    "残飯", "地雷", "ふざけ", "訴え",
   ];
 
   /* 留保・率直な指摘: サクラ投稿には現れにくい(本物らしさの証拠) */
@@ -103,10 +121,10 @@ const Analyzer = (() => {
 
   /* 実体験を示す動詞・語尾 */
   const EXPERIENCE_PATTERNS = [
-    /しました|でした|いたしました/,
+    /ました|ません|でした|いたしました/,
     /頂[きい]|いただ[きい]|食べ|飲[んみ]|味わ/,
     /行っ|訪れ|伺[いっ]|来店|入店|寄っ/,
-    /待っ|座っ|案内され|通され/,
+    /待[った]|並[んび]|座っ|案内|通され/,
   ];
 
   /* 「長いカタカナ語＝料理名」判定の誤爆を防ぐ除外語。
@@ -269,13 +287,19 @@ const Analyzer = (() => {
    *   揃う。揃っていること自体は証拠にならない。そこで、価格・料理名・
    *   注文内容といった具体的記述が豊富なほどスコアを大きく減衰させる。 */
   function scoreStyleUniformity(reviews) {
-    const usable = (reviews || []).filter(
+    const all = (reviews || []).filter(
       (r) => (r.rating || 0) >= 4 && (r.text || "").trim().length >= 10
     );
+    /* 機械翻訳された文は除外する。Googleが外国語のクチコミを翻訳して返す
+     * 場合、別人が書いた複数のクチコミが同じ翻訳エンジンの文体になり、
+     * 「揃っている」と誤判定してしまう。 */
+    const usable = all.filter((r) => !r.translated);
+    const excluded = all.length - usable.length;
     if (usable.length < 3) {
       return insufficient(
         "style_uniformity",
         `文体を比較できる高評価クチコミが${usable.length}件しかありません(3件以上必要)。`
+          + (excluded > 0 ? `機械翻訳された${excluded}件は、翻訳エンジンの文体に揃ってしまうため除外しています。` : "")
       );
     }
     const authors = new Set(usable.map((r) => r.author || ""));
@@ -327,7 +351,8 @@ const Analyzer = (() => {
       id: "style_uniformity",
       score,
       included: true,
-      evidence: `別々の投稿者による高評価クチコミ${usable.length}件について、語彙の重なり(全ペア平均)は${(meanSim * 100).toFixed(0)}%、文末表現は${Math.round(topEnd * 100)}%が同じ型、文字数のばらつきは${(cv * 100).toFixed(0)}%です。1件あたりの具体的記述は平均${meanSpec.toFixed(1)}個で、これが多いほど「揃っていても自然」と判断してスコアを${Math.round((1 - gate) * 100)}%減衰させています。`,
+      evidence: `別々の投稿者による高評価クチコミ${usable.length}件について、語彙の重なり(全ペア平均)は${(meanSim * 100).toFixed(0)}%、文末表現は${Math.round(topEnd * 100)}%が同じ型、文字数のばらつきは${(cv * 100).toFixed(0)}%です。1件あたりの具体的記述は平均${meanSpec.toFixed(1)}個で、これが多いほど「揃っていても自然」と判断してスコアを${Math.round((1 - gate) * 100)}%減衰させています。`
+        + (excluded > 0 ? ` なお、機械翻訳された${excluded}件は翻訳エンジンの文体に揃ってしまうため除外しました。` : ""),
       detail: { meanSim, topEnd, cv, meanSpec, gate, n: usable.length, authors: authors.size },
     };
   }
@@ -368,6 +393,36 @@ const Analyzer = (() => {
    * B. 投稿タイミングの軸
    * ===================================================================== */
 
+  /* 新着順(reviews_sort=newest)で取得できたクチコミだけを取り出す。
+   * これが取れている店舗では「真の直近投稿」を測れる。取れていない店舗
+   * (Legacy未使用・上限超過)では空配列が返り、従来どおり関連度順のみで
+   * 分析する。 */
+  function newestSubset(reviews) {
+    return (reviews || []).filter((r) => r.source === "newest" || r.source === "both");
+  }
+
+  /* 直近の投稿状況。newest が取れているときだけ意味を持つ */
+  function recentActivity(reviews, now) {
+    const recent = newestSubset(reviews)
+      .map((r) => ({
+        date: r.publishTime ? new Date(r.publishTime) : null,
+        rating: r.rating || 0,
+      }))
+      .filter((x) => x.date && !isNaN(x.date.getTime()))
+      .sort((a, b) => b.date - a.date);
+    if (recent.length < 2) return null;
+    const spanDays = (recent[0].date - recent[recent.length - 1].date) / DAY_MS;
+    const daysSinceNewest = (now - recent[0].date) / DAY_MS;
+    return {
+      n: recent.length,
+      spanDays,
+      daysSinceNewest,
+      allHigh: recent.every((x) => x.rating >= 4),
+      newest: recent[0].date,
+      oldest: recent[recent.length - 1].date,
+    };
+  }
+
   /* 降順に並んだ日付配列から、k件が収まる最短の窓を探す */
   function minWindow(items, k) {
     if (items.length < k) return null;
@@ -383,44 +438,43 @@ const Analyzer = (() => {
     return { days: best, items: items.slice(bestIdx, bestIdx + k) };
   }
 
-  /* ---- S4: 投稿時期の集中(バースト) ----------------------------------
+  /* ---- S4: 高評価の投稿時期の集中(バースト) --------------------------
    * 注意: Google Places API (New) が返すクチコミは投稿日時の新しい順では
    * なく「関連度順(most relevant)」で最大5件。取得後に日付でソートして
    * いるが、これは店舗の全期間から関連度で選ばれた最大5件の投稿日時の
    * ばらつきを見ているに過ぎない(計測方法モーダルで開示)。
    *
-   * 旧実装は「最古〜最新の全体幅」だけを見ていたため、
-   *   「3年に散らばる5件のうち3件だけが同じ週に固まっている」
-   * という、業者発注に最も典型的なパターンを取りこぼしていた。
-   * ここでは全体幅ではなく「3件が収まる最短の窓」を主指標にする。 */
-  function scoreBurst(reviews, count) {
+   * このシグナルは「高評価(★4以上)の集中」だけを見る。低評価が短期に
+   * 固まるのは逆方向のパターン(第三者による低評価工作の疑い)であり、
+   * E軸「低評価クチコミの質」で別途評価する。両者を1つの指標に混ぜると、
+   * 攻撃を受けている店が高評価の水増しをしているように見えてしまう。
+   *
+   * また、全体幅ではなく「3件が収まる最短の窓」を主指標にしている。
+   * 全体幅だけを見ると「3年に散らばる5件のうち3件だけが同じ週に固まって
+   * いる」という、業者発注に最も典型的なパターンを取りこぼすため。 */
+  function scoreBurst(reviews, count, recent) {
     const dated = (reviews || [])
       .map((r) => ({
         date: r.publishTime ? new Date(r.publishTime) : null,
         rating: r.rating || 0,
       }))
-      .filter((x) => x.date && !isNaN(x.date.getTime()))
+      .filter((x) => x.date && !isNaN(x.date.getTime()) && x.rating >= 4)
       .sort((a, b) => b.date - a.date); // 新しい順
 
     if (dated.length < 3) {
       return insufficient(
         "burst",
-        `投稿日時つきのクチコミが${dated.length}件しかなく、時期の分析には3件以上必要です。`
+        `投稿日時つきの高評価(★4以上)クチコミが${dated.length}件しかなく、時期の分析には3件以上必要です。`
       );
     }
 
     const win = minWindow(dated, 3);
     const days = win.days;
-    const allHigh = win.items.every((x) => x.rating >= 4);
     const totalSpanDays = Math.round((dated[0].date - dated[dated.length - 1].date) / DAY_MS);
 
     let score = piecewise(days, [
       [3, 92], [7, 82], [14, 70], [30, 55], [90, 35], [180, 20], [365, 10], [730, 5],
     ]);
-
-    /* 集中しているのが高評価だけなら、発注パターンにより近い */
-    if (allHigh) score += 8;
-    else score -= 12;
 
     /* 総クチコミ数が多い店ほど「関連度上位が数日に固まる」ことは起きにくい */
     if ((count || 0) >= 100 && days <= 14) score += 6;
@@ -429,25 +483,42 @@ const Analyzer = (() => {
     const isolatedCluster = totalSpanDays > days * 6 && days <= 30;
     if (isolatedCluster) score += 5;
 
+    /* 新着順が取得できている店舗では、関連度順による偏りのない「真の直近
+     * 投稿」を評価できる。直近の投稿が短期間に詰まっていて、しかもすべて
+     * 高評価なら、発注パターンに強く一致する。 */
+    let trueBurst = false;
+    if (recent && recent.n >= 3) {
+      if (recent.spanDays <= 14 && recent.allHigh && (count || 0) >= 30) {
+        score += 12;
+        trueBurst = true;
+      } else if (recent.spanDays >= 180) {
+        /* 直近の投稿がゆっくりしている = 自然な流入 */
+        score -= 8;
+      }
+    }
+
     score = clamp(Math.round(score), 0, 100);
 
     const from = win.items[win.items.length - 1].date;
     const to = win.items[0].date;
-    let ev = `取得できたクチコミ${dated.length}件のうち、最も密集する3件は ${fmtDate(from)} 〜 ${fmtDate(to)} の${Math.round(days)}日間に投稿されています(全体の投稿期間は${totalSpanDays}日)。`;
-    ev += allHigh
-      ? " この3件はいずれも★4以上で、高評価だけが短期に集中しています。"
-      : " ただしこの3件には低・中評価が混ざっており、発注パターンとは異なる可能性が高いため減点しています。";
+    let ev = `取得できた高評価クチコミ${dated.length}件のうち、最も密集する3件は ${fmtDate(from)} 〜 ${fmtDate(to)} の${Math.round(days)}日間に投稿されています(高評価全体の投稿期間は${totalSpanDays}日)。`;
     if (isolatedCluster) {
       ev += " 全体としては長期間に分布する中で、一部だけが固まっている形です。";
     }
-    ev += "(Google公式APIの仕様上、対象は関連度順で選ばれた最大5件です)";
+    if (recent && recent.n >= 3) {
+      ev += ` 新着順でも取得できているため、直近の投稿状況を直接確認できます: 最新${recent.n}件は${Math.round(recent.spanDays)}日間に投稿されており`;
+      ev += recent.allHigh ? "、いずれも★4以上です。" : "、評価はばらついています。";
+      if (trueBurst) ev += " 関連度順の偏りによらず、直近に高評価だけが詰まっている状態です。";
+    } else {
+      ev += "(新着順のクチコミが取得できなかったため、対象は関連度順で選ばれた最大5件です)";
+    }
 
     return {
       id: "burst",
       score,
       included: true,
       evidence: ev,
-      detail: { days, allHigh, totalSpanDays, isolatedCluster, n: dated.length },
+      detail: { days, totalSpanDays, isolatedCluster, n: dated.length },
     };
   }
 
@@ -507,85 +578,7 @@ const Analyzer = (() => {
   }
 
   /* =====================================================================
-   * D. 評価分布の軸
-   * ===================================================================== */
-
-  /* 分布入力を {p1..p5, total, mean} に正規化。件数でも割合でも可 */
-  function normalizeDistribution(dist) {
-    if (!dist) return null;
-    const raw = [1, 2, 3, 4, 5].map((k) => Number(dist[k] ?? dist[String(k)] ?? 0));
-    if (raw.some((v) => !isFinite(v) || v < 0)) return null;
-    const sum = raw.reduce((a, b) => a + b, 0);
-    if (sum <= 0) return null;
-    const p = raw.map((v) => v / sum);
-    const mean = raw.reduce((s, v, i) => s + v * (i + 1), 0) / sum;
-    return { p1: p[0], p2: p[1], p3: p[2], p4: p[3], p5: p[4], sum, mean };
-  }
-
-  /* ---- S6: 評価分布の形(お椀型・★5偏重) ------------------------------ */
-  function scoreRatingDistribution(dist, userRatingCount, rating) {
-    const d = normalizeDistribution(dist);
-    if (!d) {
-      return insufficient(
-        "rating_distribution",
-        "星ごとの件数(分布)が未入力です。Google公式APIは分布を提供していないため、分析画面の「星の分布を入力」から入力すると、この観点も採点できるようになります。"
-      );
-    }
-    if ((userRatingCount || 0) < 20) {
-      return insufficient(
-        "rating_distribution",
-        `総クチコミ数が${userRatingCount || 0}件と少なく、分布の形からの判断は誤差が大きすぎます(20件以上必要)。`
-      );
-    }
-    /* 入力の整合性チェック: 入力分布から計算した平均が、実際に表示されて
-     * いる平均評価と大きくずれている場合、入力ミスの可能性が高い。
-     * 誤った入力がスコアを押し上げるのを防ぐため、ずれが大きければ
-     * このシグナル自体を採点対象から外す。 */
-    let fitNote = "";
-    if (rating != null) {
-      const gap = Math.abs(d.mean - rating);
-      if (gap > 0.3) {
-        return insufficient(
-          "rating_distribution",
-          `入力された分布から計算される平均は ${d.mean.toFixed(2)} で、実際に表示されている評価 ${rating.toFixed(1)} と ${gap.toFixed(2)} ずれています。入力ミスの可能性が高いため、この観点は採点から除外しました。バーの長さを調整し直してください。`
-        );
-      }
-      if (gap > 0.15) {
-        fitNote = ` なお、入力分布から計算される平均(${d.mean.toFixed(2)})は実際の評価(${rating.toFixed(1)})と ${gap.toFixed(2)} ずれています。入力を見直すと精度が上がります。`;
-      }
-    }
-
-    const pMid = d.p2 + d.p3 + d.p4;
-
-    /* ★5比率: 通常55% / 偽の疑い74%(坂口2022)を基準線に採点 */
-    const excess5 = piecewise(d.p5, [
-      [NORMAL_FIVE_STAR_RATE, 0], [0.65, 20], [FAKE_FIVE_STAR_RATE, 45],
-      [0.85, 75], [0.95, 100],
-    ]);
-
-    /* お椀型(U字): ★1が中間評価(★2〜4)を圧倒しているか */
-    const uRatio = d.p1 / (pMid + d.p1 + 1e-9);
-    const uScore = piecewise(uRatio, [[0.15, 0], [0.30, 35], [0.50, 70], [0.70, 100]]);
-
-    const score = clamp(Math.round(0.6 * excess5 + 0.4 * uScore), 0, 100);
-
-    const pct = (x) => `${(x * 100).toFixed(1)}%`;
-    let ev = `入力された分布は ★5 ${pct(d.p5)} / ★4〜2(中間) ${pct(pMid)} / ★1 ${pct(d.p1)} です。`;
-    ev += ` 実証研究では、通常のレビューの★5比率が55%前後であるのに対し、偽の疑いで削除されたレビューでは74%に達すると報告されています。`;
-    if (uRatio >= 0.3) {
-      ev += ` また、中間評価が薄く★5と★1に割れる「お椀型」の特徴が出ています(★1が★1〜4合計の${Math.round(uRatio * 100)}%)。`;
-    }
-    return {
-      id: "rating_distribution",
-      score,
-      included: true,
-      evidence: ev + fitNote,
-      detail: { p5: d.p5, p1: d.p1, pMid, uRatio, mean: d.mean, sum: d.sum },
-    };
-  }
-
-  /* =====================================================================
-   * E. 評価水準の軸
+   * D. 評価水準の軸
    * ===================================================================== */
 
   /* ---- S7: 評価水準の統計的偏り -------------------------------------- */
@@ -636,6 +629,106 @@ const Analyzer = (() => {
     };
   }
 
+  /* =====================================================================
+   * E. 低評価クチコミの質の軸
+   *
+   * 「★1の中でも、文言がかなり酷評になっているものが多数ある」場合を
+   * 捉える。これは高評価の水増しとは逆方向の操作(競合など第三者による
+   * 低評価工作、いわゆる逆サクラ)の兆候であり、この場合お店は被害を
+   * 受けている側になる。方向の読み違いを防ぐため、analyze() は結果に
+   * 「パターンの向き」を添えて返す。
+   *
+   * 判別の要は「酷評であること」ではなく「酷評 × 具体性の欠如」。
+   * 本物の不満客は、何を注文し、何が起きて、どう不快だったかを具体的に
+   * 書く傾向がある。実際に来店していない投稿は罵倒だけになりやすい。
+   * ===================================================================== */
+
+  /* 1件の低評価クチコミの「実体験を伴わない酷評らしさ」を 0〜1 で返す */
+  function reviewHostility(text) {
+    const t = (text || "").trim();
+    const len = t.length;
+    if (!len) return { h: 0, mild: 0, severe: 0, specifics: 0, len: 0 };
+
+    const mild = ATTACK_PHRASES.filter((p) => t.includes(p)).length;
+    const severe = SEVERE_ATTACK_PHRASES.filter((p) => t.includes(p)).length;
+
+    let sev = Math.min(mild, 4) * 0.15 + Math.min(severe, 2) * 0.20;
+    if (len < 25 && mild >= 1) sev += 0.20;  // 短い罵倒だけ
+    if (len < 12 && mild >= 1) sev += 0.10;
+    sev = clamp(sev, 0, 1);
+    if (sev === 0) return { h: 0, mild, severe, specifics: countSpecifics(t), len };
+
+    /* 具体性が高いほど「正当な苦情」とみなして減点する */
+    const specifics = countSpecifics(t);
+    let credit = specifics >= 3 ? 0.75 : specifics >= 2 ? 0.5 : specifics >= 1 ? 0.25 : 0;
+    const experience = EXPERIENCE_PATTERNS.filter((re) => re.test(t)).length;
+    if (experience === 0) credit *= 0.5;  // 来店した形跡すらない
+
+    return { h: clamp(sev * (1 - credit), 0, 1), mild, severe, specifics, len };
+  }
+
+  /* ---- S9: 低評価クチコミの酷評度 ------------------------------------ */
+  function scoreNegativeAttack(reviews) {
+    const low = (reviews || []).filter((r) => (r.rating || 0) > 0 && (r.rating || 0) <= 2);
+    if (low.length < 2) {
+      return insufficient(
+        "negative_attack",
+        `★1〜2のクチコミが${low.length}件しかありません(2件以上必要)。Google公式APIは関連度順で最大5件しか返さないため、実際には低評価が多くても取得できない場合があります。`
+      );
+    }
+    const stats = low.map((r) => reviewHostility(r.text));
+    const meanH = stats.reduce((a, x) => a + x.h, 0) / stats.length;
+    const harsh = stats.filter((x) => x.h >= 0.4).length;
+    const noSpecific = stats.filter((x) => x.h >= 0.4 && x.specifics === 0).length;
+
+    let score = meanH * 75;
+    const parts = [];
+
+    /* 低評価どうしの文面の使い回し */
+    const texts = low.map((r) => (r.text || "").trim()).filter((t) => t.length >= 10);
+    let maxSim = 0;
+    for (let i = 0; i < texts.length; i++) {
+      for (let j = i + 1; j < texts.length; j++) {
+        maxSim = Math.max(maxSim, bigramSimilarity(texts[i], texts[j]));
+      }
+    }
+    if (maxSim > 0.35) {
+      score += clamp(((maxSim - 0.35) / 0.35) * 25, 0, 25);
+      parts.push(`文面が強く似た低評価の組があります(類似度 ${(maxSim * 100).toFixed(0)}%)`);
+    }
+
+    /* 低評価の短期集中 */
+    const dated = low
+      .map((r) => ({ date: r.publishTime ? new Date(r.publishTime) : null, rating: r.rating }))
+      .filter((x) => x.date && !isNaN(x.date.getTime()))
+      .sort((a, b) => b.date - a.date);
+    let clusterDays = null;
+    if (dated.length >= 2) {
+      clusterDays = Math.round((dated[0].date - dated[dated.length - 1].date) / DAY_MS);
+      if (clusterDays <= 14) {
+        score += 15;
+        parts.push(`${dated.length}件の低評価が${clusterDays}日以内に集中しています`);
+      }
+    }
+
+    score = clamp(Math.round(score), 0, 100);
+
+    let ev = `★1〜2のクチコミ${low.length}件のうち、罵倒・全否定が中心と判定した文が${harsh}件`;
+    ev += noSpecific > 0
+      ? `(うち${noSpecific}件は、注文内容・待ち時間・具体的な出来事などの記述が一切ありません)。`
+      : `です。`;
+    ev += " 本物の不満客は「何を注文し、何が起きて、どう不快だったか」を具体的に書く傾向があるため、具体性を伴う低評価は減点しています。";
+    if (parts.length) ev += " " + parts.join("。") + "。";
+
+    return {
+      id: "negative_attack",
+      score,
+      included: true,
+      evidence: ev,
+      detail: { meanH, harsh, noSpecific, n: low.length, maxSim, clusterDays },
+    };
+  }
+
   /* ---- シグナル定義(表示用メタデータ) -------------------------------- */
   const SIGNAL_META = {
     text_pattern: {
@@ -660,10 +753,10 @@ const Analyzer = (() => {
       altExplanation: "常連客が気軽に星だけ付ける文化の店でも高くなります。スマートフォンから星だけ付ける操作は非常に手軽です。",
     },
     burst: {
-      label: "投稿時期の集中",
+      label: "高評価の投稿時期の集中",
       axis: AXES.timing,
       weight: WEIGHTS.burst,
-      description: "取得できたクチコミのうち「最も密集する3件」が何日間に収まっているか。サクラ発注はバイトを一定期間で募集するため、短期集中で反映される傾向があります。集中しているのが高評価だけかどうかも見ています。",
+      description: "取得できた高評価(★4以上)クチコミのうち「最も密集する3件」が何日間に収まっているか。サクラ発注はバイトを一定期間で募集するため、短期集中で反映される傾向があります。低評価の集中は逆方向のパターンのため、E軸で別に評価します。",
       altExplanation: "テレビ・SNSでの話題化、開店直後、キャンペーン実施でも同じパターンが生じます。またGoogle公式APIは関連度順で最大5件しか返さないため、店舗の真の投稿状況を厳密に反映しているわけではありません。",
     },
     author_pattern: {
@@ -673,19 +766,19 @@ const Analyzer = (() => {
       description: "姓名フルネーム型の表示名の比率と、同一表示名の重複。業者が典型的な氏名リストからアカウントを量産する際の特徴とされます。",
       altExplanation: "実名で普通に使っている利用者も多く、単独では非常に弱い手掛かりです。本来この軸(投稿者のレビュー総数・プロフィール・他店への評価履歴)は最も有効とされますが、Google公式APIは表示名しか提供しないため、重みを低く設定しています。",
     },
-    rating_distribution: {
-      label: "評価分布の形",
-      axis: AXES.distribution,
-      weight: WEIGHTS.ratingDistribution,
-      description: "★5への偏りと、中間評価(★2〜4)が薄く★5と★1に割れる「お椀型」の度合い。実証研究では、偽の疑いで削除されたレビューは★1・★5に極端化することが確認されています。",
-      altExplanation: "純粋に評価の高い人気店でも★5比率は高くなります。またクレーム対応がこじれた一件で★1が付くこともあり、お椀型が必ずサクラを意味するわけではありません。",
-    },
     rating_anomaly: {
       label: "評価水準の偏り",
       axis: AXES.level,
       weight: WEIGHTS.ratingAnomaly,
       description: "件数を考慮して補正した平均評価が、国内飲食店の一般的な水準からどれだけ上振れしているか。",
       altExplanation: "本当に優れた人気店でも高くなります。この指標だけで判断はできません。",
+    },
+    negative_attack: {
+      label: "低評価の酷評度",
+      axis: AXES.negative,
+      weight: WEIGHTS.negativeAttack,
+      description: "★1〜2のクチコミが、具体的な不満の説明ではなく罵倒・全否定だけになっていないか。低評価どうしの文面の類似や、短期間への集中も見ます。実際に来店していない投稿は、何を注文したか・何が起きたかを書けないため罵倒だけになりやすいという性質を使っています。",
+      altExplanation: "本当にひどい体験をした利用者も、強い言葉で短く書くことがあります。特に衛生面や接客のトラブルは、詳細を書かずに一言で済ませる人が少なくありません。また、このシグナルが高い場合、疑われるのは店舗ではなく第三者(競合など)による低評価工作である可能性があります。",
     },
     peer_deviation: {
       label: "周辺相場との乖離",
@@ -699,8 +792,14 @@ const Analyzer = (() => {
   /* 表示順(4軸の順に並べる) */
   const SIGNAL_ORDER = [
     "text_pattern", "style_uniformity", "rating_text_gap",
-    "burst", "author_pattern", "rating_distribution",
-    "rating_anomaly", "peer_deviation",
+    "burst", "author_pattern",
+    "rating_anomaly", "peer_deviation", "negative_attack",
+  ];
+
+  /* 高評価側(店舗による水増しを疑うシグナル)。方向の判定に使う */
+  const POSITIVE_SIDE_IDS = [
+    "text_pattern", "style_uniformity", "rating_text_gap",
+    "burst", "author_pattern", "rating_anomaly", "peer_deviation",
   ];
 
   const BANDS = [
@@ -714,7 +813,7 @@ const Analyzer = (() => {
    * チェックリスト(人が目視で使える12項目に翻訳して開示する)
    * 「3項目以上に該当したら疑いが高い」という実務上の目安に対応する。
    * ===================================================================== */
-  function buildChecklist(byId, reviews) {
+  function buildChecklist(byId, reviews, recent) {
     const item = (axis, label, state, detail) => ({ axis, label, state, detail });
     const s = (id) => byId[id] || {};
     const d = (id) => (byId[id] && byId[id].detail) || {};
@@ -739,12 +838,20 @@ const Analyzer = (() => {
 
     /* B. タイミング */
     const b = s("burst"), bd = d("burst");
-    list.push(item(AXES.timing, "投稿が短期間(30日以内)に集中している",
+    list.push(item(AXES.timing, "高評価の投稿が短期間(30日以内)に集中している",
       b.included ? (bd.days <= 30 ? "hit" : "clear") : "unknown",
-      b.included ? `最密の3件が${Math.round(bd.days)}日間に集中` : "日付付きが3件未満で判定不可"));
-    list.push(item(AXES.timing, "集中しているのが高評価だけである",
-      b.included ? (bd.days <= 60 && bd.allHigh ? "hit" : "clear") : "unknown",
-      b.included ? (bd.allHigh ? "密集した3件はすべて★4以上" : "密集部分に低・中評価が混在") : "判定不可"));
+      b.included ? `最密の3件が${Math.round(bd.days)}日間に集中` : "日付付きの高評価が3件未満で判定不可"));
+    /* 「短期集中の後、ぱたりと投稿が止まる」— 発注が終わった形。
+     * 新着順が取得できて初めて測れる。単に客足が静かなだけの店を巻き込ま
+     * ないよう、集中が見えている場合に限って該当とする。 */
+    list.push(item(AXES.timing, "高評価の集中のあと、新規投稿が途絶えている",
+      recent ? ((b.included && b.score >= 60 && recent.daysSinceNewest >= 120) ? "hit" : "clear") : "unknown",
+      recent
+        ? `直近の投稿は${Math.round(recent.daysSinceNewest)}日前`
+        : "新着順のクチコミが取得できず判定不可"));
+    list.push(item(AXES.timing, "その集中が全体の投稿期間から浮いている",
+      b.included ? (bd.isolatedCluster ? "hit" : "clear") : "unknown",
+      b.included ? (bd.isolatedCluster ? `全体${bd.totalSpanDays}日の分布の中で${Math.round(bd.days)}日に集中` : "全体の分布と大きな差はない") : "判定不可"));
 
     /* C. アカウント */
     const ap = s("author_pattern"), apd = d("author_pattern");
@@ -758,38 +865,85 @@ const Analyzer = (() => {
       "unknown",
       "Google公式APIが提供しないため、本ツールでは確認できません(Googleマップ上で投稿者名をタップすると手動で確認できます)"));
 
-    /* D. 分布 */
-    const rd = s("rating_distribution"), rdd = d("rating_distribution");
-    list.push(item(AXES.distribution, "★5比率が74%以上(偽の疑いレビューの水準)",
-      rd.included ? (rdd.p5 >= FAKE_FIVE_STAR_RATE ? "hit" : "clear") : "unknown",
-      rd.included ? `★5比率 ${(rdd.p5 * 100).toFixed(1)}%` : "星の分布が未入力"));
-    list.push(item(AXES.distribution, "中間評価が薄い「お椀型」の分布",
-      rd.included ? (rdd.uRatio >= 0.3 ? "hit" : "clear") : "unknown",
-      rd.included ? `★1が★1〜4合計の${Math.round(rdd.uRatio * 100)}%` : "星の分布が未入力"));
-
     /* E. 評価水準 */
     const pd = s("peer_deviation"), pdd = d("peer_deviation");
     list.push(item(AXES.level, "周辺店舗の相場から+2σ以上突出",
       pd.included ? (pdd.z >= 2 ? "hit" : "clear") : "unknown",
       pd.included ? `z = ${pdd.z.toFixed(1)}` : "周辺店舗が5件未満で判定不可"));
 
+    /* F. 低評価の質 */
+    const na = s("negative_attack"), nad = d("negative_attack");
+    list.push(item(AXES.negative, "具体性を欠く酷評の★1・★2が多い",
+      na.included ? (nad.noSpecific >= 2 || (nad.harsh / nad.n) >= 0.5 ? "hit" : "clear") : "unknown",
+      na.included
+        ? `罵倒中心 ${nad.harsh}/${nad.n}件(うち具体的記述なし ${nad.noSpecific}件)`
+        : "★1〜2が2件未満で判定不可"));
+    list.push(item(AXES.negative, "低評価が短期間(14日以内)に集中している",
+      na.included && nad.clusterDays != null ? (nad.clusterDays <= 14 ? "hit" : "clear") : "unknown",
+      na.included && nad.clusterDays != null ? `低評価${nad.n}件が${nad.clusterDays}日間に分布` : "判定不可"));
+    list.push(item(AXES.negative, "低評価どうしの文面が似ている",
+      na.included ? (nad.maxSim > 0.35 ? "hit" : "clear") : "unknown",
+      na.included ? `最大類似度 ${(nad.maxSim * 100).toFixed(0)}%` : "判定不可"));
+
     const hits = list.filter((x) => x.state === "hit").length;
     const judged = list.filter((x) => x.state !== "unknown").length;
     return { items: list, hits, judged, total: list.length };
   }
 
+  /* ---- 表示サンプルの偏り ---------------------------------------------
+   * Google公式APIは星ごとの件数(分布)を返さないため、★1がどれだけ
+   * あるかは直接わからない。ただし「返ってきた5件の平均」と「店舗全体の
+   * 平均」を比べれば、表示されているクチコミが実態からどちらへずれて
+   * いるかは計算できる。スコアには入れず、読み手への注意書きとして返す。
+   *
+   *   全体平均より高い → 低評価が表示分に含まれていない
+   *                      (低評価側の分析ができていない可能性)
+   *   全体平均より低い → 低評価が関連度上位を占めている
+   *
+   * これは操作の証拠ではなく、Googleの関連度選択のクセでも生じる。 */
+  function assessSampleBias(place, reviews) {
+    const rated = (reviews || []).filter((r) => (r.rating || 0) >= 1);
+    if (rated.length < 3 || place.rating == null) return null;
+    const sampleMean = rated.reduce((sum, r) => sum + r.rating, 0) / rated.length;
+    const gap = sampleMean - place.rating;
+    if (Math.abs(gap) < 0.5) return null;
+
+    const lowInSample = rated.filter((r) => r.rating <= 2).length;
+    const common = `表示できたクチコミ${rated.length}件の平均は ${sampleMean.toFixed(1)} で、店舗全体の平均 ${place.rating.toFixed(1)} と ${Math.abs(gap).toFixed(1)} 離れています。`;
+
+    if (gap > 0) {
+      return {
+        key: "hidden-low",
+        label: "表示されているクチコミは、店舗全体より高評価に偏っています",
+        note: common + `つまり、ここに表示されていないところに低評価がまとまって存在します。`
+          + (lowInSample < 2
+              ? "低評価の本文が取得できていないため、低評価側の分析(E軸)は行えていません。「判定不可」は「低評価工作がない」という意味ではありません。"
+              : "")
+          + "Googleマップで低評価のクチコミをご自身でも確認されることをおすすめします。",
+      };
+    }
+    return {
+      key: "low-surfaced",
+      label: "表示されているクチコミは、店舗全体より低評価に偏っています",
+      note: common + "低評価が関連度の上位を占めている状態です。新しい低評価が集中的に投稿された直後にも起こります。",
+    };
+  }
+
   /* ---- メイン: analyze ------------------------------------------------ */
-  function analyze(place, peers) {
+  function analyze(place, peers, now) {
     const reviews = place.reviews || [];
+    /* now を引数で受け取れるようにしているのはテストのため。省略時は現在時刻 */
+    const at = now instanceof Date ? now : new Date();
+    const recent = recentActivity(reviews, at);
     const raw = [
       scoreTextPattern(reviews),
       scoreStyleUniformity(reviews),
       scoreRatingTextGap(reviews),
-      scoreBurst(reviews, place.userRatingCount),
+      scoreBurst(reviews, place.userRatingCount, recent),
       scoreAuthorPattern(reviews),
-      scoreRatingDistribution(place.ratingDistribution, place.userRatingCount, place.rating),
       scoreRatingAnomaly(place.rating, place.userRatingCount),
       scorePeerDeviation(place.rating, peers),
+      scoreNegativeAttack(reviews),
     ];
 
     const byId = {};
@@ -837,10 +991,17 @@ const Analyzer = (() => {
        * 「率直な留保を含む中間評価(★2〜4)」の存在は、自然なクチコミ分布の
        * 兆候。★1は『お椀型(二極化)』というサクラ側のパターンの一部でも
        * あるため、旧実装のように緩和材料として数えない。 */
-      const midCandid = reviews.filter(
-        (r) => (r.rating || 0) >= 2 && (r.rating || 0) <= 4 &&
-               (r.text || "").trim().length >= 20
-      ).length;
+      /* ★2は「率直な中間評価」のこともあれば「攻撃的な低評価」のことも
+       * ある。後者を緩和材料に数えると、低評価工作を受けている店ほど
+       * スコアが下がるという逆転が起きるため、酷評型は除外する。 */
+      const midCandid = reviews.filter((r) => {
+        const rt = r.rating || 0;
+        if (rt < 2 || rt > 4) return false;
+        const txt = (r.text || "").trim();
+        if (txt.length < 20) return false;
+        if (rt <= 2 && reviewHostility(txt).h >= 0.4) return false;
+        return true;
+      }).length;
       if (midCandid > 0 && score > 0) {
         let f = midCandid >= 2 ? 0.80 : 0.88;
         /* ただし、直近に高評価だけのバーストがある場合は緩和を半分に抑える。
@@ -863,7 +1024,8 @@ const Analyzer = (() => {
 
     const band = totalWeight > 0 ? BANDS.find((b) => score <= b.max) : null;
     const confidence = assessConfidence(place, peers, reviews, included.length);
-    const checklist = buildChecklist(byId, reviews);
+    const checklist = buildChecklist(byId, reviews, recent);
+    const direction = assessDirection(signals, byId);
 
     return {
       score: totalWeight > 0 ? score : null,
@@ -872,23 +1034,88 @@ const Analyzer = (() => {
       relief,
       convergence,
       checklist,
+      direction,
       signals,
+      recentActivity: recent,
+      sampleBias: assessSampleBias(place, reviews),
       sampleSize: reviews.length,
       analyzable: totalWeight > 0,
-      hasDistribution: !!normalizeDistribution(place.ratingDistribution),
+    };
+  }
+
+  /* ---- パターンの向き ------------------------------------------------
+   * 不自然さが「高評価の側」に出ているのか「低評価の側」に出ているのかを
+   * 判定する。両者は操作の方向が正反対で、後者の場合お店は被害を受けて
+   * いる側である可能性が高い。同じスコアでも意味がまるで違うため、
+   * 数値だけを見て読み違えられないよう必ず添えて表示する。 */
+  function assessDirection(signals, byId) {
+    const pos = signals.filter((x) => POSITIVE_SIDE_IDS.includes(x.id) && x.included);
+    const posW = pos.reduce((a, x) => a + x.weight, 0);
+    const posScore = posW > 0 ? pos.reduce((a, x) => a + x.score * (x.weight / posW), 0) : null;
+    const neg = byId.negative_attack;
+    const negScore = neg && neg.included ? neg.score : null;
+
+    const base = {
+      posScore: posScore == null ? null : Math.round(posScore),
+      negScore,
+      /* 低評価側は本体スコアの一部(重み10%)にしかならず、そのままでは
+       * 「本体スコアは低いのに低評価工作は明白」という状態を見落とす。
+       * 一定以上なら独立した数値として前面に出す。 */
+      showNegativeMeter: negScore != null && negScore >= 40,
+    };
+
+    if (negScore == null) {
+      return {
+        ...base,
+        key: "unknown",
+        label: "低評価側は判定できていません",
+        note: "分析対象に★1〜2のクチコミが2件以上含まれていないため、低評価側の操作(第三者による低評価工作)については判定できていません。表示中のスコアは高評価側のパターンのみを反映しています。",
+      };
+    }
+    const p = posScore == null ? 0 : posScore;
+
+    if (negScore >= 55 && negScore >= p + 15) {
+      return {
+        ...base,
+        key: "negative",
+        label: "不自然さは低評価の側に出ています",
+        note: "第三者(競合など)による低評価工作の可能性があり、その場合このお店は被害を受けている側です。上の「サクラ的パターン一致度」は主に高評価の水増しを測る指標のため、この状況では低く出ます。数値ではなく、この向きの表示でご判断ください。事実無根の投稿は、プラットフォームへの削除申請の対象になり得ます。",
+      };
+    }
+    if (negScore >= 55 && p >= 45) {
+      return {
+        ...base,
+        key: "both",
+        label: "不自然さが高評価・低評価の両側に出ています",
+        note: "評価が二極化しており、クチコミ全体が実態を反映していない可能性があります。高評価の水増しと低評価の攻撃が同時に起きている場合のほか、サクラの★5で作られた期待に本物の利用者が幻滅して★1をつけた場合(お椀型)もこの形になります。",
+      };
+    }
+    if (p >= 45) {
+      return {
+        ...base,
+        key: "positive",
+        label: "不自然さは高評価の側に出ています",
+        note: "店舗側による高評価の水増しと重なるパターンです。低評価クチコミの側には、際立った不自然さは見られません。",
+      };
+    }
+    return {
+      ...base,
+      key: "none",
+      label: "高評価側・低評価側とも際立った偏りなし",
+      note: "どちらの方向にも、操作を疑わせる際立ったパターンは見られません。",
     };
   }
 
   /* ---- 信頼度: 「分析に使えたデータ量」の指標 ------------------------- */
   function assessConfidence(place, peers, reviews, includedCount) {
     const n = reviews.length;
+    const hasNewest = newestSubset(reviews).length > 0;
     const count = place.userRatingCount || 0;
     /* scorePeerDeviation の usable 条件と揃える(そうしないと、この
      * シグナルが対象外なのに信頼度だけ「高」と出る食い違いが起こる) */
     const peerCount = (peers || []).filter(
       (p) => p && p.rating != null && (p.userRatingCount || 0) >= 5
     ).length;
-    const hasDist = !!normalizeDistribution(place.ratingDistribution) && count >= 20;
     const reasons = [];
 
     let level, label;
@@ -898,27 +1125,26 @@ const Analyzer = (() => {
       if (n < 3) reasons.push(`分析できたクチコミが${n}件と少ない`);
       if (count < 10) reasons.push(`総クチコミ数が${count}件と少ない`);
       if (includedCount < 3) reasons.push("有効なシグナルが3つ未満");
-    } else if (n >= 5 && peerCount >= 5 && count >= 50 && hasDist && includedCount >= 6) {
+    } else if (n >= 5 && peerCount >= 5 && count >= 50 && includedCount >= 6 && hasNewest) {
       level = "high";
       label = "高";
-      reasons.push(`クチコミ${n}件・周辺比較${peerCount}店舗・総数${count}件に加え、星の分布(4軸すべて)が揃っています`);
+      reasons.push(`クチコミ${n}件(新着順を含む)・周辺比較${peerCount}店舗・総数${count}件を分析`);
     } else {
       level = "mid";
       label = "中";
       reasons.push(`クチコミ${n}件・有効シグナル${includedCount}/8を分析`);
-      if (!hasDist && count >= 20) reasons.push("星の分布を入力すると信頼度が上がります");
+      if (!hasNewest) reasons.push("新着順のクチコミが取得できず、直近の投稿状況を確認できていない");
       if (peerCount < 5) reasons.push("周辺店舗の比較データが不足");
     }
     return { level, label, reasons };
   }
 
   return {
-    analyze, WEIGHTS, SIGNAL_META, SIGNAL_ORDER, BANDS, AXES,
-    FAKE_FIVE_STAR_RATE, NORMAL_FIVE_STAR_RATE,
+    analyze, WEIGHTS, SIGNAL_META, SIGNAL_ORDER, POSITIVE_SIDE_IDS, BANDS, AXES,
     /* テスト用に内部関数も公開 */
     _internal: {
-      reviewGenericness, bigramSimilarity, piecewise, isFullNameStyle,
-      normalizeDistribution, minWindow, countSpecifics, endingForm,
+      reviewGenericness, reviewHostility, bigramSimilarity, piecewise, isFullNameStyle,
+      minWindow, countSpecifics, endingForm, recentActivity, newestSubset,
     },
   };
 })();

@@ -944,95 +944,151 @@ a { color: var(--accent); }
 
 .check-detail { font-size: 0.72rem; color: var(--ink-3); line-height: 1.5; }
 
-/* --- 星の分布の手入力 --- */
-.dist-section { margin-top: 22px; }
+@media (max-width: 520px) {
+  .checklist-groups { grid-template-columns: 1fr; }
+}
 
-.dist-details {
-  border: 1px solid var(--border);
+/* =========================================================================
+ * パターンの向き / 低評価側の独立メーター
+ * ========================================================================= */
+
+.direction-note {
+  margin: 10px 0 0;
+  padding: 9px 11px;
   border-radius: var(--radius-sm);
+  border-left: 3px solid var(--ink-3);
   background: var(--surface-2);
-}
-
-.dist-details > summary {
-  list-style: none;
-  cursor: pointer;
-  padding: 11px 13px;
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.dist-details > summary::-webkit-details-marker { display: none; }
-
-.dist-title {
-  font-family: var(--font-display);
-  font-size: 0.94rem;
-  font-weight: 700;
-}
-
-.dist-state {
-  font-size: 0.72rem;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-weight: 700;
-}
-
-.dist-state.on { background: var(--band-low-soft); color: var(--band-low); }
-.dist-state.off { background: var(--band-mild-soft); color: var(--band-mild); }
-
-.dist-body { padding: 0 13px 13px; }
-
-.dist-lede {
-  margin: 0 0 12px;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   line-height: 1.75;
   color: var(--ink-2);
 }
 
-.dist-rows { display: flex; flex-direction: column; gap: 7px; }
+.direction-note strong { display: block; margin-bottom: 3px; color: var(--ink); }
 
-.dist-row {
-  display: grid;
-  grid-template-columns: 34px 1fr 38px;
-  align-items: center;
-  gap: 10px;
+.direction-note.negative {
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
 }
+.direction-note.negative strong { color: var(--accent-strong); }
 
-.dist-star { font-size: 0.78rem; font-weight: 700; color: var(--ink-2); }
-
-.dist-row input[type="range"] { width: 100%; accent-color: var(--sakura); }
-
-.dist-out {
-  font-size: 0.74rem;
-  color: var(--ink-3);
-  text-align: right;
-  font-variant-numeric: tabular-nums;
+.direction-note.both {
+  border-left-color: var(--band-caution);
+  background: var(--band-caution-soft);
 }
+.direction-note.both strong { color: var(--band-caution); }
 
-.dist-readout {
-  margin-top: 12px;
-  padding: 9px 11px;
-  background: var(--surface);
+.direction-note.positive {
+  border-left-color: var(--sakura);
+  background: var(--sakura-soft);
+}
+.direction-note.positive strong { color: var(--sakura); }
+
+/* --- 低評価側メーター --- */
+.negative-section {
+  margin-top: 22px;
+  padding: 13px 15px;
   border: 1px solid var(--border);
+  border-left: 4px solid var(--band-mild);
   border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.negative-section.caution { border-left-color: var(--band-caution); }
+.negative-section.strong { border-left-color: var(--band-strong); }
+
+.negative-head {
   display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
   flex-wrap: wrap;
-  gap: 6px 16px;
-  font-size: 0.76rem;
+}
+
+.negative-head h3 {
+  font-family: var(--font-display);
+  font-size: 0.96rem;
+  margin: 0;
+}
+
+.negative-score {
+  font-size: 1.5rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--band-mild);
+  line-height: 1;
+}
+
+.negative-score small { font-size: 0.7rem; font-weight: 400; color: var(--ink-3); }
+
+.negative-section.caution .negative-score { color: var(--band-caution); }
+.negative-section.strong .negative-score { color: var(--band-strong); }
+
+.negative-bar-track {
+  display: block;
+  height: 7px;
+  margin: 9px 0 11px;
+  border-radius: 999px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.negative-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--band-mild);
+  transition: width 0.5s ease;
+}
+
+.negative-section.caution .negative-bar-fill { background: var(--band-caution); }
+.negative-section.strong .negative-bar-fill { background: var(--band-strong); }
+
+.negative-body,
+.negative-alt {
+  margin: 0;
+  font-size: 0.79rem;
+  line-height: 1.8;
   color: var(--ink-2);
 }
 
-.dist-fit { font-weight: 700; }
-.dist-fit.ok { color: var(--band-low); }
-.dist-fit.off { color: var(--band-caution); }
-.dist-warn { color: var(--band-caution); }
-.dist-p5 { color: var(--ink-3); }
-
-.dist-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
-
-.dist-note { margin: 9px 0 0; font-size: 0.72rem; color: var(--ink-3); }
-
-@media (max-width: 520px) {
-  .checklist-groups { grid-template-columns: 1fr; }
+.negative-alt {
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--border);
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .negative-bar-fill { transition: none; }
+}
+
+/* --- 表示サンプルの偏り(注意書き) --- */
+.sample-bias {
+  margin: 18px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--band-mild);
+  background: var(--band-mild-soft);
+  font-size: 0.79rem;
+  line-height: 1.8;
+  color: var(--ink-2);
+}
+
+.sample-bias strong { display: block; margin-bottom: 3px; color: var(--band-mild); }
+
+.sample-bias.low-surfaced {
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+.sample-bias.low-surfaced strong { color: var(--accent-strong); }
+
+/* --- クチコミの取得元バッジ --- */
+.review-badge {
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.review-badge.recent { background: var(--accent-soft); color: var(--accent-strong); }
+.review-badge.translated { background: var(--surface-2); color: var(--ink-3); }
