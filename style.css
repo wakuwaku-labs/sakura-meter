@@ -1080,3 +1080,15 @@ a { color: var(--accent); }
   background: var(--accent-soft);
 }
 .sample-bias.low-surfaced strong { color: var(--accent-strong); }
+
+/* --- クチコミの取得元バッジ --- */
+.review-badge {
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.review-badge.recent { background: var(--accent-soft); color: var(--accent-strong); }
+.review-badge.translated { background: var(--surface-2); color: var(--ink-3); }

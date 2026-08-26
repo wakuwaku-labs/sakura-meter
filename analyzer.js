@@ -393,6 +393,36 @@ const Analyzer = (() => {
    * B. 投稿タイミングの軸
    * ===================================================================== */
 
+  /* 新着順(reviews_sort=newest)で取得できたクチコミだけを取り出す。
+   * これが取れている店舗では「真の直近投稿」を測れる。取れていない店舗
+   * (Legacy未使用・上限超過)では空配列が返り、従来どおり関連度順のみで
+   * 分析する。 */
+  function newestSubset(reviews) {
+    return (reviews || []).filter((r) => r.source === "newest" || r.source === "both");
+  }
+
+  /* 直近の投稿状況。newest が取れているときだけ意味を持つ */
+  function recentActivity(reviews, now) {
+    const recent = newestSubset(reviews)
+      .map((r) => ({
+        date: r.publishTime ? new Date(r.publishTime) : null,
+        rating: r.rating || 0,
+      }))
+      .filter((x) => x.date && !isNaN(x.date.getTime()))
+      .sort((a, b) => b.date - a.date);
+    if (recent.length < 2) return null;
+    const spanDays = (recent[0].date - recent[recent.length - 1].date) / DAY_MS;
+    const daysSinceNewest = (now - recent[0].date) / DAY_MS;
+    return {
+      n: recent.length,
+      spanDays,
+      daysSinceNewest,
+      allHigh: recent.every((x) => x.rating >= 4),
+      newest: recent[0].date,
+      oldest: recent[recent.length - 1].date,
+    };
+  }
+
   /* 降順に並んだ日付配列から、k件が収まる最短の窓を探す */
   function minWindow(items, k) {
     if (items.length < k) return null;
@@ -416,13 +446,13 @@ const Analyzer = (() => {
    *
    * このシグナルは「高評価(★4以上)の集中」だけを見る。低評価が短期に
    * 固まるのは逆方向のパターン(第三者による低評価工作の疑い)であり、
-   * F軸「低評価クチコミの質」で別途評価する。両者を1つの指標に混ぜると、
+   * E軸「低評価クチコミの質」で別途評価する。両者を1つの指標に混ぜると、
    * 攻撃を受けている店が高評価の水増しをしているように見えてしまう。
    *
    * また、全体幅ではなく「3件が収まる最短の窓」を主指標にしている。
    * 全体幅だけを見ると「3年に散らばる5件のうち3件だけが同じ週に固まって
    * いる」という、業者発注に最も典型的なパターンを取りこぼすため。 */
-  function scoreBurst(reviews, count) {
+  function scoreBurst(reviews, count, recent) {
     const dated = (reviews || [])
       .map((r) => ({
         date: r.publishTime ? new Date(r.publishTime) : null,
@@ -453,6 +483,20 @@ const Analyzer = (() => {
     const isolatedCluster = totalSpanDays > days * 6 && days <= 30;
     if (isolatedCluster) score += 5;
 
+    /* 新着順が取得できている店舗では、関連度順による偏りのない「真の直近
+     * 投稿」を評価できる。直近の投稿が短期間に詰まっていて、しかもすべて
+     * 高評価なら、発注パターンに強く一致する。 */
+    let trueBurst = false;
+    if (recent && recent.n >= 3) {
+      if (recent.spanDays <= 14 && recent.allHigh && (count || 0) >= 30) {
+        score += 12;
+        trueBurst = true;
+      } else if (recent.spanDays >= 180) {
+        /* 直近の投稿がゆっくりしている = 自然な流入 */
+        score -= 8;
+      }
+    }
+
     score = clamp(Math.round(score), 0, 100);
 
     const from = win.items[win.items.length - 1].date;
@@ -461,7 +505,13 @@ const Analyzer = (() => {
     if (isolatedCluster) {
       ev += " 全体としては長期間に分布する中で、一部だけが固まっている形です。";
     }
-    ev += "(Google公式APIの仕様上、対象は関連度順で選ばれた最大5件です)";
+    if (recent && recent.n >= 3) {
+      ev += ` 新着順でも取得できているため、直近の投稿状況を直接確認できます: 最新${recent.n}件は${Math.round(recent.spanDays)}日間に投稿されており`;
+      ev += recent.allHigh ? "、いずれも★4以上です。" : "、評価はばらついています。";
+      if (trueBurst) ev += " 関連度順の偏りによらず、直近に高評価だけが詰まっている状態です。";
+    } else {
+      ev += "(新着順のクチコミが取得できなかったため、対象は関連度順で選ばれた最大5件です)";
+    }
 
     return {
       id: "burst",
@@ -706,7 +756,7 @@ const Analyzer = (() => {
       label: "高評価の投稿時期の集中",
       axis: AXES.timing,
       weight: WEIGHTS.burst,
-      description: "取得できた高評価(★4以上)クチコミのうち「最も密集する3件」が何日間に収まっているか。サクラ発注はバイトを一定期間で募集するため、短期集中で反映される傾向があります。低評価の集中は逆方向のパターンのため、F軸で別に評価します。",
+      description: "取得できた高評価(★4以上)クチコミのうち「最も密集する3件」が何日間に収まっているか。サクラ発注はバイトを一定期間で募集するため、短期集中で反映される傾向があります。低評価の集中は逆方向のパターンのため、E軸で別に評価します。",
       altExplanation: "テレビ・SNSでの話題化、開店直後、キャンペーン実施でも同じパターンが生じます。またGoogle公式APIは関連度順で最大5件しか返さないため、店舗の真の投稿状況を厳密に反映しているわけではありません。",
     },
     author_pattern: {
@@ -763,7 +813,7 @@ const Analyzer = (() => {
    * チェックリスト(人が目視で使える12項目に翻訳して開示する)
    * 「3項目以上に該当したら疑いが高い」という実務上の目安に対応する。
    * ===================================================================== */
-  function buildChecklist(byId, reviews) {
+  function buildChecklist(byId, reviews, recent) {
     const item = (axis, label, state, detail) => ({ axis, label, state, detail });
     const s = (id) => byId[id] || {};
     const d = (id) => (byId[id] && byId[id].detail) || {};
@@ -791,6 +841,14 @@ const Analyzer = (() => {
     list.push(item(AXES.timing, "高評価の投稿が短期間(30日以内)に集中している",
       b.included ? (bd.days <= 30 ? "hit" : "clear") : "unknown",
       b.included ? `最密の3件が${Math.round(bd.days)}日間に集中` : "日付付きの高評価が3件未満で判定不可"));
+    /* 「短期集中の後、ぱたりと投稿が止まる」— 発注が終わった形。
+     * 新着順が取得できて初めて測れる。単に客足が静かなだけの店を巻き込ま
+     * ないよう、集中が見えている場合に限って該当とする。 */
+    list.push(item(AXES.timing, "高評価の集中のあと、新規投稿が途絶えている",
+      recent ? ((b.included && b.score >= 60 && recent.daysSinceNewest >= 120) ? "hit" : "clear") : "unknown",
+      recent
+        ? `直近の投稿は${Math.round(recent.daysSinceNewest)}日前`
+        : "新着順のクチコミが取得できず判定不可"));
     list.push(item(AXES.timing, "その集中が全体の投稿期間から浮いている",
       b.included ? (bd.isolatedCluster ? "hit" : "clear") : "unknown",
       b.included ? (bd.isolatedCluster ? `全体${bd.totalSpanDays}日の分布の中で${Math.round(bd.days)}日に集中` : "全体の分布と大きな差はない") : "判定不可"));
@@ -872,13 +930,16 @@ const Analyzer = (() => {
   }
 
   /* ---- メイン: analyze ------------------------------------------------ */
-  function analyze(place, peers) {
+  function analyze(place, peers, now) {
     const reviews = place.reviews || [];
+    /* now を引数で受け取れるようにしているのはテストのため。省略時は現在時刻 */
+    const at = now instanceof Date ? now : new Date();
+    const recent = recentActivity(reviews, at);
     const raw = [
       scoreTextPattern(reviews),
       scoreStyleUniformity(reviews),
       scoreRatingTextGap(reviews),
-      scoreBurst(reviews, place.userRatingCount),
+      scoreBurst(reviews, place.userRatingCount, recent),
       scoreAuthorPattern(reviews),
       scoreRatingAnomaly(place.rating, place.userRatingCount),
       scorePeerDeviation(place.rating, peers),
@@ -963,7 +1024,7 @@ const Analyzer = (() => {
 
     const band = totalWeight > 0 ? BANDS.find((b) => score <= b.max) : null;
     const confidence = assessConfidence(place, peers, reviews, included.length);
-    const checklist = buildChecklist(byId, reviews);
+    const checklist = buildChecklist(byId, reviews, recent);
     const direction = assessDirection(signals, byId);
 
     return {
@@ -975,6 +1036,7 @@ const Analyzer = (() => {
       checklist,
       direction,
       signals,
+      recentActivity: recent,
       sampleBias: assessSampleBias(place, reviews),
       sampleSize: reviews.length,
       analyzable: totalWeight > 0,
@@ -1047,6 +1109,7 @@ const Analyzer = (() => {
   /* ---- 信頼度: 「分析に使えたデータ量」の指標 ------------------------- */
   function assessConfidence(place, peers, reviews, includedCount) {
     const n = reviews.length;
+    const hasNewest = newestSubset(reviews).length > 0;
     const count = place.userRatingCount || 0;
     /* scorePeerDeviation の usable 条件と揃える(そうしないと、この
      * シグナルが対象外なのに信頼度だけ「高」と出る食い違いが起こる) */
@@ -1062,14 +1125,15 @@ const Analyzer = (() => {
       if (n < 3) reasons.push(`分析できたクチコミが${n}件と少ない`);
       if (count < 10) reasons.push(`総クチコミ数が${count}件と少ない`);
       if (includedCount < 3) reasons.push("有効なシグナルが3つ未満");
-    } else if (n >= 5 && peerCount >= 5 && count >= 50 && includedCount >= 6) {
+    } else if (n >= 5 && peerCount >= 5 && count >= 50 && includedCount >= 6 && hasNewest) {
       level = "high";
       label = "高";
-      reasons.push(`クチコミ${n}件・周辺比較${peerCount}店舗・総数${count}件を分析`);
+      reasons.push(`クチコミ${n}件(新着順を含む)・周辺比較${peerCount}店舗・総数${count}件を分析`);
     } else {
       level = "mid";
       label = "中";
       reasons.push(`クチコミ${n}件・有効シグナル${includedCount}/8を分析`);
+      if (!hasNewest) reasons.push("新着順のクチコミが取得できず、直近の投稿状況を確認できていない");
       if (peerCount < 5) reasons.push("周辺店舗の比較データが不足");
     }
     return { level, label, reasons };
@@ -1080,7 +1144,7 @@ const Analyzer = (() => {
     /* テスト用に内部関数も公開 */
     _internal: {
       reviewGenericness, reviewHostility, bigramSimilarity, piecewise, isFullNameStyle,
-      minWindow, countSpecifics, endingForm,
+      minWindow, countSpecifics, endingForm, recentActivity, newestSubset,
     },
   };
 })();

@@ -311,6 +311,7 @@
           } else {
             place.gmapsUri = data.googleMapsUri || null;
             place.reviews = (data.reviews || []).map(normalizeSharedReview);
+            place.reviewSources = data.reviewSources || null;
             if (data.rating != null) place.rating = data.rating;
             if (data.userRatingCount != null) place.userRatingCount = data.userRatingCount;
           }
@@ -370,7 +371,10 @@
     return {
       rating: r.rating ?? null,
       text,
-      translated: !!(original && shown && original !== shown),
+      translated: r._translated === true || !!(original && shown && original !== shown),
+      /* "relevant" | "newest" | "both" — Worker がマージ時に付与する。
+       * 新着順で取得できたクチコミだけが「真の直近投稿」を表す。 */
+      source: r._source || "relevant",
       publishTime: r.publishTime || null,
       author: (r.authorAttribution && r.authorAttribution.displayName) || "Googleユーザー",
       relative: r.relativePublishTimeDescription || "",
@@ -489,7 +493,7 @@
       <section class="reviews-section">
         <h3>分析対象のクチコミ
           <span class="section-note">${place._live
-            ? `Google マップより(公式APIが返す関連度順・最大5件)`
+            ? reviewSourceNote(place, reviews)
             : `架空のサンプルクチコミ(${reviews.length}件)`}</span>
         </h3>
         ${place.reviewFetchError ? `<p class="status-line error">クチコミの取得に失敗しました。</p>` : ""}
@@ -640,6 +644,16 @@
     </details>`;
   }
 
+  /* 取得できたクチコミの内訳。関連度順のみか、新着順とマージできたかで
+   * 分析の質が変わるため、利用者に明示する。 */
+  function reviewSourceNote(place, reviews) {
+    const rs = place.reviewSources;
+    if (rs && rs.hasNewest) {
+      return `Google マップより(関連度順${rs.relevantCount}件と新着順${rs.newestCount}件をマージして${reviews.length}件)`;
+    }
+    return `Google マップより(公式APIが返す関連度順・最大5件)`;
+  }
+
   function reviewItemHtml(rv) {
     const date = rv.publishTime ? new Date(rv.publishTime) : null;
     const dateStr = date && !isNaN(date)
@@ -652,6 +666,9 @@
         <span class="review-author">${esc(rv.author)}</span>
         <span class="stars" aria-hidden="true">${starString(rv.rating || 0)}</span>
         <span>${esc(dateStr)}</span>
+        ${rv.source === "newest" || rv.source === "both"
+          ? `<span class="review-badge recent">新着順で取得</span>` : ""}
+        ${rv.translated ? `<span class="review-badge translated">機械翻訳</span>` : ""}
       </div>
       <p class="review-text${text ? "" : " empty"}">${text ? esc(text) : "(本文なし・星のみの投稿)"}</p>
     </article>`;
