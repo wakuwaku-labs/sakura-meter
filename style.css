@@ -144,6 +144,7 @@ a { color: var(--accent); }
 }
 
 .brand-mark {
+  margin: 0;
   font-family: var(--font-display);
   font-weight: 700;
   font-size: 1.45rem;
