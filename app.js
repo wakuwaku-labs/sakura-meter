@@ -26,6 +26,7 @@
     mode: "demo",          // "shared" | "own" | "demo"
     places: [],            // 正規化済み: {id,name,genre,area,address,rating,userRatingCount,priceLevel,reviews?,gmapsUri?,location?,_live?,_shared?}
     selectedId: null,
+    lastQuery: "",
     map: null,
     markers: [],
     mapsReady: false,
@@ -68,7 +69,23 @@
     setupSearch();
     renderModeBanner(null, state.ownKeyError);
 
-    if (state.mode === "demo") {
+    const deepLink = new URLSearchParams(location.search);
+    const dq = deepLink.get("q");
+    const dPlace = deepLink.get("place");
+
+    if (dq || dPlace) {
+      if (dq) $("#search-input").value = dq;
+      if (state.mode === "own") await liveSearchOwn(dq || "");
+      else if (state.mode === "shared") await liveSearchShared(dq || "");
+      else demoSearch(dq || "");
+
+      if (dPlace) {
+        await selectPlace(dPlace);
+        if (state.selectedId !== dPlace) {
+          showBannerNotice("共有されたリンクの店舗が見つかりませんでした。下の検索結果からお選びください。");
+        }
+      }
+    } else if (state.mode === "demo") {
       state.places = DEMO_PLACES.map(normalizeDemoPlace);
       renderResults("デモ店舗一覧(架空データ)");
     }
@@ -134,6 +151,7 @@
   }
 
   function demoSearch(q) {
+    state.lastQuery = q || "";
     const all = DEMO_PLACES.map(normalizeDemoPlace);
     if (!q) {
       state.places = all;
@@ -151,6 +169,7 @@
 
   /* ---- 共有Worker経由の検索(既定・訪問者は設定不要) ---- */
   async function liveSearchShared(q) {
+    state.lastQuery = q || "";
     if (!q) {
       renderResultsMessage("検索キーワードを入力してください(例: 渋谷 焼肉)。");
       return;
@@ -196,6 +215,7 @@
 
   /* ---- 自分のAPIキー経由の検索(任意・上級者向け) ---- */
   async function liveSearchOwn(q) {
+    state.lastQuery = q || "";
     if (!q) {
       renderResultsMessage("検索キーワードを入力してください(例: 渋谷 焼肉)。");
       return;
@@ -250,7 +270,19 @@
     $("#result-list").innerHTML = `<li class="empty-note${loading ? " loading" : ""}">${esc(msg)}</li>`;
   }
 
+  /* 選択中の店舗をURLに反映し、そのままコピーすれば同じ分析結果を再現できるようにする */
+  function syncPermalink() {
+    const params = new URLSearchParams();
+    if (state.selectedId) {
+      if (state.lastQuery) params.set("q", state.lastQuery);
+      params.set("place", state.selectedId);
+    }
+    const qs = params.toString();
+    history.replaceState(null, "", location.pathname + (qs ? `?${qs}` : ""));
+  }
+
   function renderResults(title) {
+    syncPermalink();
     $("#results-title").textContent = title || "検索結果";
     $("#results-attribution").textContent =
       state.mode === "shared" || state.mode === "own" ? "検索結果: Google マップ提供" : "架空のサンプルデータ";
@@ -421,7 +453,10 @@
 
     const headerHtml = `
       <header class="place-header">
-        <h2>${esc(place.name)}</h2>
+        <div class="place-header-row">
+          <h2>${esc(place.name)}</h2>
+          ${place._live ? `<button type="button" class="share-link-btn" id="share-link-btn">🔗 共有リンクをコピー</button>` : ""}
+        </div>
         <div class="place-sub">
           ${place.rating != null ? `<span><span class="stars" aria-hidden="true">${starString(place.rating)}</span> ${place.rating.toFixed(1)}(${place.userRatingCount}件)</span>` : ""}
           ${place.genre ? `<span>${esc(place.genre)}</span>` : ""}
@@ -442,6 +477,7 @@
         ${sampleBiasHtml(r)}
         ${checklistSectionHtml(r)}
         ${disclaimerHtml()}`;
+      bindShareButton(panel);
       return;
     }
 
@@ -508,6 +544,7 @@
     panel.innerHTML = headerHtml + gaugeHtml + sampleBiasHtml(r) + negativeHtml +
                       checklistHtml + signalsHtml + reviewsHtml + disclaimerHtml();
     bindModalButtons(panel);
+    bindShareButton(panel);
 
     /* ゲージのアニメーション(reduced-motion環境ではCSS側で無効化) */
     requestAnimationFrame(() => {
@@ -515,6 +552,24 @@
         const c = panel.querySelector(".gauge-value");
         if (c) c.style.strokeDashoffset = (circumference - dash).toFixed(1);
       });
+    });
+  }
+
+  function bindShareButton(panel) {
+    const btn = panel.querySelector("#share-link-btn");
+    if (!btn) return;
+    btn.addEventListener("click", async () => {
+      const url = location.href;
+      const original = btn.textContent;
+      try {
+        await navigator.clipboard.writeText(url);
+        btn.textContent = "コピーしました";
+      } catch (err) {
+        console.error(err);
+        window.prompt("このURLをコピーしてください:", url);
+        return;
+      }
+      setTimeout(() => { btn.textContent = original; }, 1800);
     });
   }
 
